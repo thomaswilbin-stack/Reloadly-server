@@ -98,3 +98,28 @@ res.send(
 app.listen(PORT, () => {
 console.log(`🚀 Serveur démarré sur ${PORT}`);
 });
+// =========================
+// LISTE DES OPÉRATEURS HAÏTI
+// =========================
+app.get("/operators-haiti", async (req, res) => {
+try {
+if (!reloadlyToken) {
+return res.send("❌ Reloadly non authentifié");
+}
+
+const response = await axios.get(
+"https://topups.reloadly.com/operators/countries/HT",
+{
+headers: {
+Authorization: `Bearer ${reloadlyToken}`,
+Accept: "application/com.reloadly.topups-v1+json"
+}
+}
+);
+
+res.json(response.data);
+} catch (err) {
+console.error("❌ Erreur opérateurs", err.response?.data || err.message);
+res.status(500).send("Erreur opérateurs Haïti");
+}
+});
