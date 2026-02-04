@@ -3,151 +3,117 @@ const bodyParser = require("body-parser");
 const axios = require("axios");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(bodyParser.json());
 
-// =========================
-// VARIABLES MÉMOIRE (SEMI-AUTO)
-// =========================
-let derniereCommande = null;
+// ================= CONFIG =================
+const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
+const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
+const RELOADLY_ENV = "production"; // production ou sandbox
+const OPERATOR_ID = 173; // Digicel Haiti (change si besoin)
+
 let reloadlyToken = null;
 
-// =========================
-// TEST SERVEUR
-// =========================
-app.get("/", (req, res) => {
-res.send("✅ Reloadly server running (semi-automatique)");
-});
-
-// =========================
-// WEBHOOK SHOPIFY
-// =========================
-app.post("/webhook", (req, res) => {
-console.log("✅ WEBHOOK SHOPIFY REÇU");
-
-const orderId = req.body.id;
-const items = req.body.line_items || [];
-let numeroRecharge = null;
-let montantRecharge = null;
-
-items.forEach(item => {
-// 💰 Prix du produit = montant recharge
-montantRecharge = parseFloat(item.price);
-
-// 📱 Champ personnalisé
-if (item.properties) {
-item.properties.forEach(prop => {
-if (prop.name === "Numéro à recharger") {
-numeroRecharge = prop.value;
-}
-});
-}
-});
-
-console.log("🧾 Commande :", orderId);
-console.log("📱 Numéro :", numeroRecharge);
-console.log("💰 Montant :", montantRecharge);
-
-if (
-!numeroRecharge ||
-!numeroRecharge.startsWith("509") ||
-!montantRecharge
-) {
-console.log("❌ Données invalides");
-return res.sendStatus(200);
-}
-
-// Stockage temporaire (semi-auto)
-derniereCommande = {
-orderId,
-numeroRecharge,
-montantRecharge
-};
-
-console.log("⏸️ Recharge en attente (semi-auto)");
-res.sendStatus(200);
-});
-
-// =========================
-// AUTHENTIFICATION RELOADLY
-// =========================
-app.get("/auth-reloadly", async (req, res) => {
+// ================= AUTH RELOADLY =================
+async function getReloadlyToken() {
 try {
-const response = await axios.post(
-"https://auth.reloadly.com/oauth/token",
+const res = await axios.post(
+`https://auth.reloadly.com/oauth/token`,
 {
-client_id: process.env.RELOADLY_CLIENT_ID,
-client_secret: process.env.RELOADLY_CLIENT_SECRET,
+client_id: RELOADLY_CLIENT_ID,
+client_secret: RELOADLY_CLIENT_SECRET,
 grant_type: "client_credentials",
-audience: "https://topups.reloadly.com"
+audience:
+RELOADLY_ENV === "production"
+? "https://topups.reloadly.com"
+: "https://topups-sandbox.reloadly.com",
 }
 );
 
-reloadlyToken = response.data.access_token;
-
+reloadlyToken = res.data.access_token;
 console.log("🔐 Token Reloadly obtenu");
-res.send("✅ Auth Reloadly réussie");
 } catch (err) {
-console.error("❌ Erreur auth Reloadly", err.response?.data || err.message);
-res.status(500).send("Erreur Reloadly auth");
+console.log("❌ Erreur auth Reloadly", err.response?.data || err.message);
 }
+}
+
+// ================= TEST SERVER =================
+app.get("/", (req, res) => {
+res.send("✅ Serveur Reloadly actif");
 });
 
-// =========================
-// RECHARGE RÉELLE (SEMI-AUTO)
-// =========================
-app.get("/recharge", async (req, res) => {
+// ================= WEBHOOK SHOPIFY =================
+app.post("/webhook", async (req, res) => {
+console.log("✅ WEBHOOK SHOPIFY REÇU");
+
 try {
-if (!derniereCommande) {
-return res.send("❌ Aucune recharge en attente");
+const order = req.body;
+const items = order.line_items || [];
+const properties = items[0]?.properties || [];
+
+let phone = "";
+let amount = items[0]?.price || 0;
+
+properties.forEach((p) => {
+if (p.name === "Numéro à recharger") phone = p.value;
+});
+
+console.log("📱 Numéro reçu :", phone);
+console.log("💰 Montant :", amount);
+
+// ===== FORMATAGE NUMÉRO (OBLIGATOIRE) =====
+phone = phone.toString().trim();
+if (!phone.startsWith("+")) {
+phone = "+" + phone;
 }
 
-if (!reloadlyToken) {
-return res.send("❌ Reloadly non authentifié");
+console.log("📱 Numéro formaté :", phone);
+
+// Validation Haiti
+if (!phone.match(/^\+509\d{8}$/)) {
+console.log("❌ Numéro invalide");
+return res.status(400).send("Numéro invalide");
 }
-// 👉 OPÉRATEUR
-const operatorId = 173; // 173 = Digicel Haiti | 174 = Natcom Haiti
+
+console.log("⏸️ Recharge prête (semi-auto)");
+res.sendStatus(200);
+
+// ================= LANCEMENT MANUEL (SEMI-AUTO) =================
+// 👉 Quand TU veux lancer la recharge, décommente ce bloc
+
+/*
+if (!reloadlyToken) {
+await getReloadlyToken();
+}
 
 console.log("🚀 Lancement recharge");
-console.log("📱 Numéro :", derniereCommande.numeroRecharge);
-console.log("💰 Montant :", derniereCommande.montantRecharge);
 
-const response = await axios.post(
+const recharge = await axios.post(
 "https://topups.reloadly.com/topups",
 {
-operatorId: operatorId,
-amount: derniereCommande.montantRecharge,
-useLocalAmount: false,
+operatorId: OPERATOR_ID,
+amount: Number(amount),
 recipientPhone: {
 countryCode: "HT",
-number: derniereCommande.numeroRecharge
-}
+number: phone,
+},
 },
 {
 headers: {
 Authorization: `Bearer ${reloadlyToken}`,
-Accept: "application/com.reloadly.topups-v1+json",
-"Content-Type": "application/json"
-}
+"Content-Type": "application/json",
+},
 }
 );
 
-console.log("✅ RECHARGE EFFECTUÉE :", response.data);
-
-// 🔒 Anti double recharge
-derniereCommande = null;
-
-res.send("🎉 Recharge effectuée avec succès");
+console.log("✅ Recharge réussie", recharge.data);
+*/
 } catch (err) {
-console.error("❌ Erreur recharge", err.response?.data || err.message);
-res.status(500).send("Erreur lors de la recharge");
+console.log("❌ Erreur webhook", err.response?.data || err.message);
 }
 });
 
-// =========================
-// LANCEMENT SERVEUR
-// =========================
+// ================= START SERVER =================
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+console.log(`🚀 Serveur lancé sur port ${PORT}`);
 });
