@@ -1,134 +1,91 @@
 import express from "express";
 import axios from "axios";
-import sgMail from "@sendgrid/mail";
-import twilio from "twilio";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// =====================
-// CONFIG RELOADLY
-// =====================
-const RELOADLY_ENV = process.env.RELOADLY_ENV || "sandbox";
-const RELOADLY_BASE =
+/* ==============================
+VARIABLES ENV (RENDER)
+================================ */
+const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
+const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
+const RELOADLY_ENV = process.env.RELOADLY_ENV || "sandbox"; // sandbox | production
+
+const RELOADLY_AUTH_URL =
 RELOADLY_ENV === "production"
-? "https://topups.reloadly.com"
-: "https://topups-sandbox.reloadly.com";
+? "https://auth.reloadly.com/oauth/token"
+: "https://auth.reloadly.com/oauth/token";
 
-let reloadlyToken = null;
+const RELOADLY_TOPUP_URL =
+RELOADLY_ENV === "production"
+? "https://topups.reloadly.com/topups"
+: "https://topups.reloadly.com/topups";
 
-// =====================
-// EMAIL / SMS CONFIG
-// =====================
-if (process.env.SENDGRID_API_KEY) {
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-}
-
-const twilioClient =
-process.env.TWILIO_ACCOUNT_SID &&
-process.env.TWILIO_AUTH_TOKEN
-? twilio(
-process.env.TWILIO_ACCOUNT_SID,
-process.env.TWILIO_AUTH_TOKEN
-)
-: null;
-
-// =====================
-// AUTH RELOADLY
-// =====================
-async function getReloadlyToken() {
-if (reloadlyToken) return reloadlyToken;
-
-const res = await axios.post(
-"https://auth.reloadly.com/oauth/token",
-{
-client_id: process.env.RELOADLY_CLIENT_ID,
-client_secret: process.env.RELOADLY_CLIENT_SECRET,
-grant_type: "client_credentials",
-audience: RELOADLY_BASE
-},
-{ headers: { "Content-Type": "application/json" } }
-);
-
-reloadlyToken = res.data.access_token;
-return reloadlyToken;
-}
-
-// =====================
-// DÉTECTION OPÉRATEUR
-// =====================
-async function detectOperator(phone) {
-const token = await getReloadlyToken();
-
-const res = await axios.get(
-`${RELOADLY_BASE}/operators/auto-detect/phone/${phone}/countries/HT`,
-{
-headers: {
-Authorization: `Bearer ${token}`,
-Accept: "application/json"
-}
-}
-);
-
-return res.data;
-}
-
-// =====================
-// STOCKAGE
-// =====================
+/* ==============================
+STOCKAGE EN MÉMOIRE (simple)
+================================ */
 const pendingRecharges = [];
 
-// =====================
-// WEBHOOK SHOPIFY
-// =====================
+/* ==============================
+AUTH RELOADLY (INTERNE)
+================================ */
+async function getReloadlyToken() {
+const res = await axios.post(RELOADLY_AUTH_URL, {
+client_id: RELOADLY_CLIENT_ID,
+client_secret: RELOADLY_CLIENT_SECRET,
+grant_type: "client_credentials",
+audience: "https://topups.reloadly.com"
+});
+
+return res.data.access_token;
+}
+
+/* ==============================
+WEBHOOK SHOPIFY
+================================ */
 app.post("/webhook", async (req, res) => {
-try {
+console.log("✅ WEBHOOK SHOPIFY REÇU");
+
 const order = req.body;
-const item = order.line_items[0];
 
-const phoneProp = item.properties?.find(p =>
-p.name.toLowerCase().includes("num")
-);
+const phone =
+order.note_attributes?.find(f => f.name === "Numero a recharger")?.value ||
+null;
 
-const phone = phoneProp?.value;
-const amount = parseFloat(item.price);
+const amount = parseFloat(order.total_price);
 
-if (!phone || !amount) return res.sendStatus(200);
+console.log("📱 Numéro reçu :", phone);
+console.log("💰 Montant reçu :", amount);
 
-const operator = await detectOperator(phone);
+if (!phone || isNaN(amount) || amount <= 0) {
+console.log("❌ Données invalides");
+return res.status(400).send("Invalid data");
+}
 
 pendingRecharges.push({
 orderId: order.id,
-orderNumber: order.order_number,
 phone,
 amount,
-operatorId: operator.operatorId,
-operatorName: operator.name,
 email: order.email,
-customerPhone: order.phone,
 status: "PENDING"
 });
 
-console.log("⏸️ Recharge en attente :", order.id);
-res.sendStatus(200);
-} catch (err) {
-console.error(err.message);
-res.sendStatus(200);
-}
+console.log("⏸️ Recharge en attente (semi-auto)");
+res.send("OK");
 });
 
-// =====================
-// LISTE ADMIN
-// =====================
+/* ==============================
+VOIR COMMANDES EN ATTENTE
+================================ */
 app.get("/pending-recharges", (req, res) => {
 res.json(pendingRecharges.filter(r => r.status === "PENDING"));
 });
 
-// =====================
-// CONFIRMER RECHARGE
-// =====================
+/* ==============================
+CONFIRMER RECHARGE
+================================ */
 app.get("/confirm/:orderId", async (req, res) => {
 const recharge = pendingRecharges.find(
 r => r.orderId == req.params.orderId
@@ -141,15 +98,15 @@ return res.status(404).send("Commande introuvable");
 try {
 const token = await getReloadlyToken();
 
-await axios.post(
-`${RELOADLY_BASE}/topups`,
+const response = await axios.post(
+RELOADLY_TOPUP_URL,
 {
-operatorId: recharge.operatorId,
-amount: recharge.amount,
 recipientPhone: {
 countryCode: "HT",
 number: recharge.phone.replace("+509", "")
-}
+},
+amount: recharge.amount,
+operatorId: 173 // Digicel Haiti (à adapter si besoin)
 },
 {
 headers: {
@@ -162,42 +119,20 @@ Accept: "application/com.reloadly.topups-v1+json",
 
 recharge.status = "COMPLETED";
 
-// =====================
-// MESSAGE CLIENT
-// =====================
-const message = `✅ Recharge réussie !
-Opérateur : ${recharge.operatorName}
-Numéro : ${recharge.phone}
-Montant : ${recharge.amount} CAD
-Merci pour votre confiance.`;
-
-// EMAIL
-if (recharge.email && process.env.SENDGRID_API_KEY) {
-await sgMail.send({
-to: recharge.email,
-from: process.env.EMAIL_FROM,
-subject: "Recharge mobile effectuée avec succès",
-text: message
+console.log("✅ Recharge exécutée");
+res.json({
+success: true,
+reloadly: response.data
 });
-}
-
-// SMS
-if (recharge.customerPhone && twilioClient) {
-await twilioClient.messages.create({
-body: message,
-from: process.env.TWILIO_PHONE_NUMBER,
-to: recharge.customerPhone
-});
-}
-
-res.json({ success: true });
 } catch (err) {
-console.error(err.response?.data || err.message);
-res.status(500).send("Erreur recharge");
+console.error("❌ Erreur recharge", err.response?.data || err.message);
+res.status(500).json(err.response?.data || err.message);
 }
 });
 
-// =====================
+/* ==============================
+TEST SERVEUR
+================================ */
 app.get("/", (req, res) => {
 res.send("🚀 Serveur Reloadly actif");
 });
