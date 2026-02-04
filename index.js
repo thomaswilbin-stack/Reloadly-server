@@ -5,19 +5,17 @@ const axios = require("axios");
 const app = express();
 app.use(bodyParser.json());
 
-// ================= CONFIG =================
+// ================== CONFIG ==================
 const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = "production"; // production ou sandbox
-const OPERATOR_ID = 173; // Digicel Haiti (change si besoin)
 
 let reloadlyToken = null;
 
-// ================= AUTH RELOADLY =================
+// ================== AUTH RELOADLY ==================
 async function getReloadlyToken() {
-try {
 const res = await axios.post(
-`https://auth.reloadly.com/oauth/token`,
+"https://auth.reloadly.com/oauth/token",
 {
 client_id: RELOADLY_CLIENT_ID,
 client_secret: RELOADLY_CLIENT_SECRET,
@@ -30,68 +28,84 @@ RELOADLY_ENV === "production"
 );
 
 reloadlyToken = res.data.access_token;
-console.log("🔐 Token Reloadly obtenu");
-} catch (err) {
-console.log("❌ Erreur auth Reloadly", err.response?.data || err.message);
-}
+console.log("🔐 Reloadly authentifié");
 }
 
-// ================= TEST SERVER =================
+// ================== AUTO-DETECT OPERATOR ==================
+async function detectOperator(phone) {
+if (!reloadlyToken) await getReloadlyToken();
+
+const res = await axios.get(
+`https://topups.reloadly.com/operators/auto-detect/phone/${phone}`,
+{
+headers: { Authorization: `Bearer ${reloadlyToken}` },
+}
+);
+
+console.log("📡 Opérateur détecté :", res.data.name);
+return res.data;
+}
+// ================== TEST ==================
 app.get("/", (req, res) => {
 res.send("✅ Serveur Reloadly actif");
 });
 
-// ================= WEBHOOK SHOPIFY =================
+// ================== WEBHOOK SHOPIFY ==================
 app.post("/webhook", async (req, res) => {
 console.log("✅ WEBHOOK SHOPIFY REÇU");
 
 try {
 const order = req.body;
-const items = order.line_items || [];
-const properties = items[0]?.properties || [];
+const item = order.line_items[0];
+const properties = item.properties || [];
 
 let phone = "";
-let amount = items[0]?.price || 0;
+let amount = "";
 
-properties.forEach((p) => {
+properties.forEach(p => {
 if (p.name === "Numéro à recharger") phone = p.value;
+if (p.name === "Montant Recharge") amount = p.value;
 });
 
 console.log("📱 Numéro reçu :", phone);
-console.log("💰 Montant :", amount);
+console.log("💰 Montant reçu :", amount);
 
-// ===== FORMATAGE NUMÉRO (OBLIGATOIRE) =====
+// ===== FORMAT NUMÉRO =====
 phone = phone.toString().trim();
-if (!phone.startsWith("+")) {
-phone = "+" + phone;
-}
+if (!phone.startsWith("+")) phone = "+" + phone;
 
-console.log("📱 Numéro formaté :", phone);
-
-// Validation Haiti
 if (!phone.match(/^\+509\d{8}$/)) {
 console.log("❌ Numéro invalide");
 return res.status(400).send("Numéro invalide");
 }
 
-console.log("⏸️ Recharge prête (semi-auto)");
-res.sendStatus(200);
-
-// ================= LANCEMENT MANUEL (SEMI-AUTO) =================
-// 👉 Quand TU veux lancer la recharge, décommente ce bloc
-
-/*
-if (!reloadlyToken) {
-await getReloadlyToken();
+amount = Number(amount);
+if (!amount || amount < 1) {
+console.log("❌ Montant invalide");
+return res.status(400).send("Montant invalide");
 }
 
-console.log("🚀 Lancement recharge");
+console.log("📱 Numéro formaté :", phone);
+console.log("💰 Montant validé :", amount);
+
+// ===== AUTO-DETECTION OPÉRATEUR =====
+const operator = await detectOperator(phone);
+const operatorId = operator.operatorId;
+
+console.log("✅ Operator ID utilisé :", operatorId);
+console.log("⏸️ Recharge prête (semi-automatique)");
+
+// ===== SEMI-AUTO (PAS ENCORE EXÉCUTÉ) =====
+// 👉 Pour passer FULL AUTO, décommente le bloc ci-dessous
+
+/*
+if (!reloadlyToken) await getReloadlyToken();
 
 const recharge = await axios.post(
 "https://topups.reloadly.com/topups",
 {
-operatorId: OPERATOR_ID,
-amount: Number(amount),
+operatorId: operatorId,
+amount: amount,
 recipientPhone: {
 countryCode: "HT",
 number: phone,
@@ -105,15 +119,19 @@ Authorization: `Bearer ${reloadlyToken}`,
 }
 );
 
-console.log("✅ Recharge réussie", recharge.data);
+console.log("✅ Recharge effectuée", recharge.data);
 */
+
+res.sendStatus(200);
+
 } catch (err) {
 console.log("❌ Erreur webhook", err.response?.data || err.message);
+res.sendStatus(500);
 }
 });
 
-// ================= START SERVER =================
+// ================== START ==================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-console.log(`🚀 Serveur lancé sur port ${PORT}`);
+console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
