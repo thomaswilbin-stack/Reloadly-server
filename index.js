@@ -61,7 +61,7 @@ function normalizeHaitiPhone(phone) {
 return phone
 .replace(/\s+/g, "")
 .replace("+509", "")
-.replace("509", "");
+.replace(/^509/, "");
 }
 
 async function getReloadlyToken() {
@@ -94,7 +94,6 @@ if (processedOrders.has(order.id)) {
 console.log("⚠️ Commande déjà traitée :", order.id);
 return res.status(200).send("Already processed");
 }
-
 processedOrders.add(order.id);
 
 console.log("✅ Webhook Shopify reçu");
@@ -106,10 +105,8 @@ let amount = null;
 
 for (const item of order.line_items || []) {
 for (const prop of item.properties || []) {
-if (
-prop.name.toLowerCase().includes("numéro") ||
-prop.name.toLowerCase().includes("numero")
-) {
+if (prop.name.toLowerCase().includes("numéro") ||
+prop.name.toLowerCase().includes("numero")) {
 phone = prop.value;
 }
 if (prop.name.toLowerCase().includes("montant")) {
@@ -118,9 +115,7 @@ amount = parseFloat(prop.value);
 }
 }
 
-if (!amount) {
-amount = parseFloat(order.total_price);
-}
+if (!amount) amount = parseFloat(order.total_price);
 
 console.log("📱 Numéro reçu:", phone);
 console.log("💰 Montant reçu:", amount);
@@ -135,9 +130,9 @@ const cleanPhone = normalizeHaitiPhone(phone);
 /* ===== AUTH RELOADLY ===== */
 const token = await getReloadlyToken();
 
-/* ===== AUTO-DETECT OPÉRATEUR ===== */
+/* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
 const detectRes = await axios.get(
-`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
+`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
 {
 headers: {
 Authorization: `Bearer ${token}`,
