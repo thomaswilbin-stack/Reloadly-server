@@ -1,165 +1,163 @@
 import express from "express";
 import axios from "axios";
+import bodyParser from "body-parser";
 
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
+
+/* =========================
+CONFIG
+========================= */
 
 const PORT = process.env.PORT || 3000;
+const RELOADLY_AUTH_URL = "https://auth.reloadly.com/oauth/token";
+const RELOADLY_TOPUP_URL = "https://topups.reloadly.com/topups";
 
-// Stockage temporaire (semi-automatique)
-const pendingRecharges = {};
-let reloadlyToken = null;
+/* =========================
+MÉMOIRE ANTI-DUPLICATION
+========================= */
 
-/* ===========================
-🔐 AUTHENTIFICATION RELOADLY
-=========================== */
+const processedOrders = new Set();
+const pendingRecharges = new Map();
+
+/* =========================
+AUTH RELOADLY
+========================= */
+
 async function getReloadlyToken() {
-if (reloadlyToken) return reloadlyToken;
-
-const audience =
-process.env.RELOADLY_ENV === "production"
-? "https://topups.reloadly.com"
-: "https://topups-sandbox.reloadly.com";
-
-const res = await axios.post(
-"https://auth.reloadly.com/oauth/token",
-{
+const res = await axios.post(RELOADLY_AUTH_URL, {
 client_id: process.env.RELOADLY_CLIENT_ID,
 client_secret: process.env.RELOADLY_CLIENT_SECRET,
 grant_type: "client_credentials",
-audience
-},
-{ headers: { "Content-Type": "application/json" } }
-);
-
-reloadlyToken = res.data.access_token;
-console.log("🔐 Reloadly authentifié");
-return reloadlyToken;
-}
-
-/* ===========================
-🧾 WEBHOOK SHOPIFY
-=========================== */
-app.post("/webhook", (req, res) => {
-try {
-const order = req.body;
-const orderId = order.id;
-
-let phone = null;
-
-// 🔎 Cherche le numéro dans les produits
-for (const item of order.line_items || []) {
-for (const prop of item.properties || []) {
-if (
-prop.name.toLowerCase().includes("num") ||
-prop.name.toLowerCase().includes("phone")
-) {
-phone = prop.value;
-}
-}
-}
-
-if (!phone) {
-console.log("❌ Numéro reçu null");
-return res.status(400).send("Numéro manquant");
-}
-
-pendingRecharges[orderId] = {
-phone,
-amount: Number(order.total_price),
-currency: order.currency || "USD"
-};
-
-console.log("✅ WEBHOOK SHOPIFY REÇU");
-console.log("🧾 Commande ID :", orderId);
-console.log("📱 Numéro à recharger :", phone);
-console.log("⏸️ Recharge en attente");
-
-res.sendStatus(200);
-} catch (err) {
-console.error("❌ Erreur webhook :", err.message);
-res.sendStatus(500);
-}
+audience: "https://topups.reloadly.com"
 });
 
-/* ===========================
-📋 VOIR LES RECHARGES EN ATTENTE
-=========================== */
-app.get("/pending-recharges", (req, res) => {
-res.json(pendingRecharges);
-});
-
-/* ===========================
-✅ CONFIRMER UNE RECHARGE
-=========================== */
-app.get("/confirm/:orderId", async (req, res) => {
-const { orderId } = req.params;
-const recharge = pendingRecharges[orderId];
-
-if (!recharge) {
-return res.status(404).send("Commande introuvable");
+return res.data.access_token;
 }
 
+/* =========================
+RECHARGE AVEC 2 RETRIES IMMÉDIATS
+========================= */
+
+async function reloadlyRecharge(payload, orderId) {
+let attempts = 0;
+
+while (attempts < 2) {
 try {
+attempts++;
 const token = await getReloadlyToken();
 
-// 🔎 Détection opérateur
-const operatorRes = await axios.get(
-`https://topups.reloadly.com/operators/auto-detect/phone/${recharge.phone}/countries/HT`,
-{
+await axios.post(RELOADLY_TOPUP_URL, payload, {
 headers: {
 Authorization: `Bearer ${token}`,
+"Content-Type": "application/json",
 Accept: "application/com.reloadly.topups-v1+json"
 }
+});
+
+console.log(`✅ Recharge réussie (commande ${orderId})`);
+processedOrders.add(orderId);
+pendingRecharges.delete(orderId);
+return;
+
+} catch (err) {
+console.error(`❌ Tentative ${attempts} échouée`, err.response?.data || err.message);
+if (attempts >= 2) throw err;
+await new Promise(r => setTimeout(r, 2000));
 }
-);
+}
+}
 
-const operatorId = operatorRes.data.operatorId;
-console.log("📡 Opérateur détecté :", operatorRes.data.name);
+/* =========================
+WEBHOOK SHOPIFY
+========================= */
 
-// 💸 Lancer la recharge
-const topupRes = await axios.post(
-"https://topups.reloadly.com/topups",
-{
+app.post("/webhook", async (req, res) => {
+try {
+const orderId = req.body.id;
+if (processedOrders.has(orderId)) {
+return res.status(200).send("Déjà traité");
+}
+
+const phone = req.body.note_attributes?.find(
+f => f.name === "Numéro à recharger"
+)?.value;
+
+if (!phone) {
+console.error("❌ Numéro manquant");
+return res.status(400).send("Numéro invalide");
+}
+
+const amount = req.body.total_price;
+const operatorId = phone.startsWith("5097") ? 173 : 174;
+
+const payload = {
 operatorId,
-amount: recharge.amount,
+amount: Number(amount),
 useLocalAmount: false,
-customIdentifier: `order-${orderId}`,
 recipientPhone: {
 countryCode: "HT",
-number: recharge.phone.replace("+509", "").replace("509", "")
+number: phone.replace("509", "")
 }
-},
-{
+};
+
+try {
+await reloadlyRecharge(payload, orderId);
+} catch (e) {
+console.log("⏸️ Recharge mise en attente");
+pendingRecharges.set(orderId, {
+payload,
+attempts: 2
+});
+}
+
+res.status(200).send("Webhook reçu");
+
+} catch (e) {
+console.error("❌ Erreur webhook", e.message);
+res.status(500).send("Erreur serveur");
+}
+});
+
+/* =========================
+RETRY DIFFÉRÉ (3 FOIS)
+========================= */
+
+setInterval(async () => {
+for (const [orderId, job] of pendingRecharges) {
+if (job.attempts >= 5) {
+console.error(`🛑 Abandon recharge ${orderId}`);
+pendingRecharges.delete(orderId);
+continue;
+}
+
+try {
+job.attempts++;
+console.log(`🔁 Retry différé ${job.attempts}/5 (${orderId})`);
+
+const token = await getReloadlyToken();
+await axios.post(RELOADLY_TOPUP_URL, job.payload, {
 headers: {
 Authorization: `Bearer ${token}`,
-Accept: "application/com.reloadly.topups-v1+json",
-"Content-Type": "application/json"
-}
-}
-);
-
-delete pendingRecharges[orderId];
-
-console.log("✅ Recharge effectuée avec succès");
-res.json({
-success: true,
-orderId,
-transaction: topupRes.data
-});
-} catch (err) {
-console.error("❌ Erreur recharge :", err.response?.data || err.message);
-res.status(500).send("Erreur recharge");
+"Content-Type": "application/json",
+Accept: "application/com.reloadly.topups-v1+json"
 }
 });
 
-/* ===========================
-🚀 SERVEUR
-=========================== */
-app.get("/", (req, res) => {
-res.send("Reloadly server actif");
-});
+console.log(`✅ Recharge réussie après retry`);
+processedOrders.add(orderId);
+pendingRecharges.delete(orderId);
+
+} catch (e) {
+console.log(`⏳ Toujours en attente (${job.attempts}/5)`);
+}
+}
+}, 5 * 60 * 1000);
+
+/* =========================
+START
+========================= */
 
 app.listen(PORT, () => {
-console.log(`🚀 Serveur lancé sur port ${PORT}`);
+console.log(`🚀 Serveur actif sur le port ${PORT}`);
 });
