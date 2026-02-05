@@ -30,18 +30,10 @@ type: "application/json",
 );
 
 /* =======================
-ANTI-DOUBLON
-======================= */
-const processedOrders = new Set();
-
-/* =======================
 UTILS
 ======================= */
 function verifyShopifyWebhook(req) {
-if (!SHOPIFY_WEBHOOK_SECRET) {
-console.log("⚠️ SHOPIFY_WEBHOOK_SECRET manquant – vérification ignorée");
-return true;
-}
+if (!SHOPIFY_WEBHOOK_SECRET) return true;
 
 const hmac = req.headers["x-shopify-hmac-sha256"];
 if (!hmac) return false;
@@ -79,7 +71,7 @@ return res.data.access_token;
 }
 
 /* =======================
-WEBHOOK SHOPIFY
+WEBHOOK SHOPIFY (orders/paid)
 ======================= */
 app.post("/webhook", async (req, res) => {
 try {
@@ -90,14 +82,15 @@ return res.status(401).send("Unauthorized");
 
 const order = JSON.parse(req.body.toString());
 
-if (processedOrders.has(order.id)) {
-console.log("⚠️ Commande déjà traitée :", order.id);
-return res.status(200).send("Already processed");
+/* 🔐 BLOCAGE CRITIQUE */
+if (order.financial_status !== "paid") {
+console.log("⏸️ Commande non payée – ignorée");
+return res.status(200).send("Not paid");
 }
-processedOrders.add(order.id);
 
-console.log("✅ Webhook Shopify reçu");
-console.log("🧾 Commande:", order.id);
+console.log("✅ Webhook Shopify PAYÉ reçu");
+console.log("🧾 Commande ID:", order.id);
+console.log("🧩 Checkout ID:", order.checkout_id);
 
 /* ===== EXTRACTION DONNÉES ===== */
 let phone = null;
@@ -105,8 +98,10 @@ let amount = null;
 
 for (const item of order.line_items || []) {
 for (const prop of item.properties || []) {
-if (prop.name.toLowerCase().includes("numéro") ||
-prop.name.toLowerCase().includes("numero")) {
+if (
+prop.name.toLowerCase().includes("numéro") ||
+prop.name.toLowerCase().includes("numero")
+) {
 phone = prop.value;
 }
 if (prop.name.toLowerCase().includes("montant")) {
@@ -130,7 +125,7 @@ const cleanPhone = normalizeHaitiPhone(phone);
 /* ===== AUTH RELOADLY ===== */
 const token = await getReloadlyToken();
 
-/* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
+/* ===== AUTO-DETECT OPÉRATEUR ===== */
 const detectRes = await axios.get(
 `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
 {
@@ -144,6 +139,9 @@ Accept: "application/com.reloadly.topups-v1+json",
 const operatorId = detectRes.data.operatorId;
 console.log("📡 Opérateur détecté:", detectRes.data.name);
 
+/* ===== CLÉ UNIQUE ANTI-DOUBLON (ULTIME) ===== */
+const rechargeReference = `shopify-checkout-${order.checkout_id}`;
+
 /* ===== RECHARGE ===== */
 const topupRes = await axios.post(
 `${RELOADLY_BASE_URL}/topups`,
@@ -155,7 +153,7 @@ recipientPhone: {
 countryCode: "HT",
 number: cleanPhone,
 },
-referenceId: `shopify-${order.id}`,
+referenceId: rechargeReference,
 },
 {
 headers: {
@@ -171,6 +169,14 @@ console.log("🆔 Transaction:", topupRes.data.transactionId);
 
 res.status(200).send("Recharge success");
 } catch (err) {
+if (
+err.response?.status === 409 &&
+err.response?.data?.message?.toLowerCase().includes("duplicate")
+) {
+console.log("⚠️ Recharge déjà effectuée – duplication bloquée");
+return res.status(200).send("Duplicate blocked");
+}
+
 console.error(
 "❌ Erreur recharge:",
 err.response?.data || err.message
@@ -187,7 +193,7 @@ res.send("✅ Reloadly Shopify Server OK");
 });
 
 /* =======================
-START SERVER
+START
 ======================= */
 app.listen(PORT || 10000, () => {
 console.log(`🚀 Serveur lancé sur port ${PORT || 10000}`);
