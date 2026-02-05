@@ -1,37 +1,45 @@
 import express from "express";
-import axios from "axios";
 import crypto from "crypto";
+import axios from "axios";
 
 const app = express();
 
-/* =========================
-CONFIG
-========================= */
-const PORT = process.env.PORT || 10000;
-const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
-const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+// ================== CONFIG ==================
+const {
+SHOPIFY_WEBHOOK_SECRET,
+RELOADLY_CLIENT_ID,
+RELOADLY_CLIENT_SECRET,
+RELOADLY_ENV = "production", // sandbox | production
+PORT
+} = process.env;
 
-/* =========================
-MIDDLEWARE
-========================= */
-app.use(express.json({
-verify: (req, res, buf) => {
-req.rawBody = buf;
-}
-}));
+const reloadlyBaseUrl =
+RELOADLY_ENV === "production"
+? "https://topups.reloadly.com"
+: "https://topups-sandbox.reloadly.com";
 
-/* =========================
-UTILITAIRES
-========================= */
+// ================== MIDDLEWARE ==================
+app.use(
+express.raw({
+type: "application/json",
+})
+);
+
+// ================== ANTI-DOUBLON ==================
+const processedOrders = new Set();
+
+// ================== UTILS ==================
 function verifyShopifyWebhook(req) {
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const digest = crypto
 .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-.update(req.rawBody)
+.update(req.body)
 .digest("base64");
 
-return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(digest));
+return crypto.timingSafeEqual(
+Buffer.from(digest),
+Buffer.from(hmac)
+);
 }
 
 async function getReloadlyToken() {
@@ -41,116 +49,115 @@ const res = await axios.post(
 client_id: RELOADLY_CLIENT_ID,
 client_secret: RELOADLY_CLIENT_SECRET,
 grant_type: "client_credentials",
-audience: "https://topups.reloadly.com"
-}
+audience: reloadlyBaseUrl,
+},
+{ headers: { "Content-Type": "application/json" } }
 );
 return res.data.access_token;
 }
 
-async function retry(fn, attempts = 5, delay = 2000) {
-let lastError;
-for (let i = 1; i <= attempts; i++) {
-try {
-return await fn();
-} catch (err) {
-lastError = err;
-console.log(`🔁 Retry ${i}/${attempts} échoué`);
-await new Promise(r => setTimeout(r, delay));
-}
-}
-throw lastError;
-}
-
-/* =========================
-WEBHOOK SHOPIFY
-========================= */
+// ================== WEBHOOK ==================
 app.post("/webhook", async (req, res) => {
 try {
 if (!verifyShopifyWebhook(req)) {
-console.log("❌ Webhook Shopify invalide");
-return res.status(401).send("Unauthorized");
+console.log("❌ Webhook invalide");
+return res.status(401).send("Invalid webhook");
 }
+
+const order = JSON.parse(req.body.toString());
+
+if (processedOrders.has(order.id)) {
+console.log("⚠️ Commande déjà traitée :", order.id);
+return res.status(200).send("Already processed");
+}
+
+processedOrders.add(order.id);
 
 console.log("✅ WEBHOOK SHOPIFY REÇU");
+console.log("🧾 Commande :", order.id);
 
-const order = req.body;
+// ========= EXTRACTION DONNÉES =========
+let phone = null;
+let amount = Number(order.total_price);
 
-const properties = order.line_items?.[0]?.properties || [];
-
-console.log("📦 PROPRIÉTÉS :", properties);
-
-const phone = properties.find(p =>
-p.name.toLowerCase().includes("numéro")
-)?.value || null;
-
-const amountRaw = properties.find(p =>
-p.name.toLowerCase().includes("montant")
-)?.value || null;
-
-const amount = amountRaw ? parseFloat(amountRaw) : null;
-
-if (!phone || !amount || isNaN(amount)) {
-console.log("❌ Données invalides", phone, amount);
-return res.status(200).send("Données invalides");
+for (const item of order.line_items) {
+if (item.properties) {
+for (const prop of item.properties) {
+if (
+prop.name.toLowerCase().includes("numéro") ||
+prop.name.toLowerCase().includes("numero")
+) {
+phone = prop.value;
+}
+}
+}
 }
 
-console.log("📱 Numéro :", phone);
-console.log("💰 Montant :", amount);
+console.log("📱 Numéro reçu :", phone);
+console.log("💰 Montant reçu :", amount);
 
-/* =========================
-AUTH RELOADLY
-========================= */
+if (!phone || !amount || amount <= 0) {
+console.log("❌ Données invalides", phone, amount);
+return res.status(200).send("Invalid data");
+}
+
+// ========= RELOADLY =========
 const token = await getReloadlyToken();
 
-/* =========================
-DÉTECTION OPÉRATEUR
-========================= */
-const operatorRes = await axios.get(
-`https://topups.reloadly.com/operators/auto-detect/phone/${phone}`,
-{ headers: { Authorization: `Bearer ${token}` } }
+// 🔎 Détection opérateur
+const detectRes = await axios.get(
+`${reloadlyBaseUrl}/operators/auto-detect/phone/${phone}/countries/HT`,
+{
+headers: {
+Authorization: `Bearer ${token}`,
+Accept: "application/json",
+},
+}
 );
 
-const operatorId = operatorRes.data.operatorId;
-
+const operatorId = detectRes.data.operatorId;
 console.log("📡 Opérateur détecté :", operatorId);
 
-/* =========================
-RECHARGE AVEC RETRY
-========================= */
-const recharge = async () => {
-return axios.post(
-"https://topups.reloadly.com/topups",
+// ⚡ Recharge
+const topupRes = await axios.post(
+`${reloadlyBaseUrl}/topups`,
 {
 operatorId,
 amount,
 useLocalAmount: false,
 recipientPhone: {
 countryCode: "HT",
-number: phone.replace("+509", "")
-}
+number: phone.replace("+509", ""),
 },
-{ headers: { Authorization: `Bearer ${token}` } }
+referenceId: `shopify-${order.id}`,
+},
+{
+headers: {
+Authorization: `Bearer ${token}`,
+"Content-Type": "application/json",
+},
+}
 );
-};
 
-const result = await retry(recharge, 5);
+console.log("🎉 RECHARGE RÉUSSIE");
+console.log("🆔 Transaction :", topupRes.data.transactionId);
 
-console.log("✅ RECHARGE RÉUSSIE", result.data.transactionId);
-
-res.status(200).send("Recharge effectuée");
+res.status(200).send("Recharge success");
 } catch (err) {
-console.error("❌ Erreur recharge :", err.response?.data || err.message);
-res.status(200).send("Erreur traitée");
+console.error(
+"❌ Erreur recharge :",
+err.response?.data || err.message
+);
+res.status(200).send("Error handled");
 }
 });
 
-/* =========================
-SERVER
-========================= */
+// ================== HEALTH CHECK ==================
 app.get("/", (req, res) => {
-res.send("Reloadly server OK");
+res.send("✅ Reloadly Shopify Server OK");
 });
 
-app.listen(PORT, () => {
-console.log(`🚀 Serveur lancé sur port ${PORT}`);
+// ================== START ==================
+app.listen(PORT || 10000, () => {
+console.log(`🚀 Serveur lancé sur port ${PORT || 10000}`);
 });
