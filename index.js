@@ -9,28 +9,25 @@ app.use(bodyParser.json());
 VARIABLES ENV (RENDER)
 ========================= */
 const PORT = process.env.PORT || 3000;
-
 const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
-const RELOADLY_ENV = "https://auth.reloadly.com"; // PROD
 
 /* =========================
-MÉMOIRE SIMPLE (ANTI DUP)
-(pour prod long terme → DB)
+ANTI-DUPLICATION
 ========================= */
 const processedOrders = new Set();
 
 /* =========================
-UTIL : SLEEP
+UTILS
 ========================= */
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /* =========================
 AUTH RELOADLY
 ========================= */
 async function getReloadlyToken() {
 const res = await axios.post(
-`${RELOADLY_ENV}/oauth/token`,
+"https://auth.reloadly.com/oauth/token",
 {
 client_id: RELOADLY_CLIENT_ID,
 client_secret: RELOADLY_CLIENT_SECRET,
@@ -44,28 +41,43 @@ return res.data.access_token;
 }
 
 /* =========================
-DÉTECTION OPÉRATEUR
+AUTO-DETECT OPÉRATEUR (RELOADLY)
 ========================= */
-function detectOperator(phone) {
-if (phone.startsWith("5093") || phone.startsWith("5094")) return 173; // Digicel Haiti
-if (phone.startsWith("5095") || phone.startsWith("5096")) return 174; // Natcom Haiti
-throw new Error("Opérateur non reconnu");
+async function detectOperatorViaReloadly(phone, token) {
+const cleanPhone = phone.replace("+", "");
+
+const res = await axios.get(
+`https://topups.reloadly.com/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
+{
+headers: {
+Authorization: `Bearer ${token}`,
+Accept: "application/com.reloadly.topups-v1+json"
+}
+}
+);
+
+if (!res.data?.operatorId) {
+throw new Error("Opérateur non détecté");
+}
+
+console.log("📡 Opérateur détecté :", res.data.name);
+return res.data.operatorId;
 }
 
 /* =========================
-RECHARGE AVEC RETRY
+PROCESS RECHARGE (5 RETRIES)
 ========================= */
 async function processRecharge({ orderId, phone, amount }) {
 
 if (processedOrders.has(orderId)) {
-console.log("⛔ Recharge déjà effectuée pour", orderId);
+console.log("⛔ Recharge déjà traitée :", orderId);
 return;
 }
 
 processedOrders.add(orderId);
 
-const operatorId = detectOperator(phone);
 const token = await getReloadlyToken();
+const operatorId = await detectOperatorViaReloadly(phone, token);
 
 const payload = {
 operatorId,
@@ -74,7 +86,7 @@ useLocalAmount: false,
 customIdentifier: orderId,
 recipientPhone: {
 countryCode: "HT",
-number: phone.replace("509", "")
+number: phone.replace("+509", "").replace("509", "")
 }
 };
 
@@ -82,7 +94,7 @@ const MAX_RETRIES = 5;
 
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 try {
-console.log(`🔁 Tentative ${attempt} pour commande ${orderId}`);
+console.log(`🔁 Tentative ${attempt} | Commande ${orderId}`);
 
 const res = await axios.post(
 "https://topups.reloadly.com/topups",
@@ -90,25 +102,24 @@ payload,
 {
 headers: {
 Authorization: `Bearer ${token}`,
-"Content-Type": "application/json",
-Accept: "application/com.reloadly.topups-v1+json"
+Accept: "application/com.reloadly.topups-v1+json",
+"Content-Type": "application/json"
 }
 }
 );
 
-console.log("✅ Recharge réussie :", res.data);
+console.log("✅ Recharge réussie :", res.data.transactionId);
 return;
 
 } catch (err) {
-console.error(`❌ Tentative ${attempt} échouée`);
+console.error(`❌ Échec tentative ${attempt}`);
 
 if (attempt === MAX_RETRIES) {
-console.error("🚨 Recharge abandonnée définitivement", err.response?.data || err.message);
+console.error("🚨 Recharge abandonnée", err.response?.data || err.message);
 return;
 }
 
-// Retry différé (progressif)
-await sleep(attempt * 5000); // 5s, 10s, 15s, 20s...
+await sleep(attempt * 5000); // 5s, 10s, 15s, 20s, 25s
 }
 }
 }
@@ -120,33 +131,38 @@ app.post("/webhook", async (req, res) => {
 try {
 const order = req.body;
 
-// sécurité : uniquement commandes payées
 if (order.financial_status !== "paid") {
 return res.status(200).send("Commande non payée");
 }
-
-const orderId = order.id;
 
 let phone = null;
 let amount = null;
 
 for (const item of order.line_items) {
 if (item.properties) {
+console.log("🧪 PROPRIÉTÉS :", item.properties);
+
 for (const prop of item.properties) {
-if (prop.name === "Numéro à recharger") phone = prop.value;
-if (prop.name === "Montant recharge") amount = Number(prop.value);
+const name = prop.name.toLowerCase();
+
+if (name.includes("numéro")) phone = prop.value;
+if (name.includes("montant")) amount = Number(prop.value);
 }
 }
 }
 
-if (!phone || !amount) {
+if (!phone || !amount || isNaN(amount)) {
 console.error("❌ Données invalides", phone, amount);
 return res.status(400).send("Données invalides");
 }
 
-console.log("📥 WEBHOOK REÇU", { orderId, phone, amount });
+console.log("📥 WEBHOOK OK", { phone, amount });
 
-await processRecharge({ orderId, phone, amount });
+await processRecharge({
+orderId: order.id,
+phone,
+amount
+});
 
 res.status(200).send("OK");
 
@@ -160,7 +176,7 @@ res.status(500).send("Erreur serveur");
 ROUTE TEST
 ========================= */
 app.get("/", (req, res) => {
-res.send("🚀 Serveur Recharge 100% automatique actif");
+res.send("🚀 Serveur Recharge 100 % automatique ACTIF");
 });
 
 /* =========================
