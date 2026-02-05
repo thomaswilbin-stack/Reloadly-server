@@ -4,22 +4,31 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-
-// =====================
-// CONFIG RELOADLY
-// =====================
+// ===============================
+// CONFIG
+// ===============================
+const PORT = process.env.PORT || 3000;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "sandbox";
-const RELOADLY_BASE =
+
+const TOPUP_BASE =
 RELOADLY_ENV === "production"
 ? "https://topups.reloadly.com"
 : "https://topups-sandbox.reloadly.com";
 
-let reloadlyToken = null;
+const AUTH_AUDIENCE =
+RELOADLY_ENV === "production"
+? "https://topups.reloadly.com"
+: "https://topups-sandbox.reloadly.com";
 
-// =====================
-// AUTH RELOADLY
-// =====================
+// ===============================
+// MEMORY (simple)
+// ===============================
+let reloadlyToken = null;
+const pendingRecharges = {};
+
+// ===============================
+// RELOADLY AUTH
+// ===============================
 async function getReloadlyToken() {
 if (reloadlyToken) return reloadlyToken;
 
@@ -29,7 +38,7 @@ const res = await axios.post(
 client_id: process.env.RELOADLY_CLIENT_ID,
 client_secret: process.env.RELOADLY_CLIENT_SECRET,
 grant_type: "client_credentials",
-audience: RELOADLY_BASE
+audience: AUTH_AUDIENCE
 },
 { headers: { "Content-Type": "application/json" } }
 );
@@ -39,14 +48,66 @@ console.log("🔐 Reloadly authentifié");
 return reloadlyToken;
 }
 
-// =====================
-// DÉTECTION OPÉRATEUR
-// =====================
-async function detectOperator(phone) {
+// ===============================
+// SHOPIFY WEBHOOK
+// ===============================
+app.post("/webhook", async (req, res) => {
+try {
+const order = req.body;
+const orderId = order.id;
+
+let phone = null;
+
+if (order.note_attributes) {
+const field = order.note_attributes.find(
+f => f.name.toLowerCase().includes("num")
+);
+if (field) phone = field.value;
+}
+
+if (!phone) {
+console.log("❌ Numéro reçu null");
+return res.status(400).send("Numéro manquant");
+}
+
+pendingRecharges[orderId] = {
+phone,
+amount: order.total_price,
+currency: order.currency || "USD"
+};
+
+console.log("✅ WEBHOOK SHOPIFY REÇU");
+console.log("🧾 Commande ID :", orderId);
+console.log("📱 Numéro :", phone);
+console.log("⏸️ Recharge en attente");
+
+res.sendStatus(200);
+} catch (err) {
+console.error("❌ Erreur webhook :", err.message);
+res.sendStatus(500);
+}
+});
+
+// ===============================
+// LISTE RECHARGES À CONFIRMER
+// ===============================
+app.get("/pending-recharges", (req, res) => {
+res.json(pendingRecharges);
+});
+
+// ===============================
+// CONFIRMATION MANUELLE
+// ===============================
+app.get("/confirm/:orderId", async (req, res) => {
+try {
+const data = pendingRecharges[req.params.orderId];
+if (!data) return res.status(404).send("Commande introuvable");
+
 const token = await getReloadlyToken();
 
-const res = await axios.get(
-`${RELOADLY_BASE}/operators/auto-detect/phone/${phone}/countries/HT`,
+// 1️⃣ Détection opérateur
+const operatorRes = await axios.get(
+`${TOPUP_BASE}/operators/auto-detect/phone/${data.phone}/countries/HT`,
 {
 headers: {
 Authorization: `Bearer ${token}`,
@@ -55,113 +116,19 @@ Accept: "application/json"
 }
 );
 
-return res.data;
-}
+const operatorId = operatorRes.data.operatorId;
+console.log("📡 Opérateur détecté :", operatorRes.data.name);
 
-// =====================
-// STOCKAGE EN MÉMOIRE
-// =====================
-const pendingRecharges = [];
-
-// =====================
-// WEBHOOK SHOPIFY
-// =====================
-app.post("/webhook", async (req, res) => {
-try {
-console.log("✅ WEBHOOK SHOPIFY REÇU");
-
-const order = req.body;
-const item = order.line_items?.[0];
-if (!item) return res.sendStatus(200);
-
-// 🔍 LECTURE ROBUSTE DU NUMÉRO
-let phone = null;
-
-// 1️⃣ Line item properties
-if (item.properties?.length) {
-const p = item.properties.find(x =>
-x.name.toLowerCase().includes("num")
-);
-if (p) phone = p.value;
-}
-
-// 2️⃣ Note attributes
-if (!phone && order.note_attributes?.length) {
-const n = order.note_attributes.find(x =>
-x.name.toLowerCase().includes("num")
-);
-if (n) phone = n.value;
-}
-
-// 3️⃣ Custom attributes (fallback)
-if (!phone && item.custom_attributes?.length) {
-const c = item.custom_attributes.find(x =>
-x.key.toLowerCase().includes("num")
-);
-if (c) phone = c.value;
-}
-
-const amount = parseFloat(item.price);
-
-console.log("📱 Numéro reçu :", phone);
-console.log("💰 Montant reçu :", amount);
-
-if (!phone || isNaN(amount) || amount <= 0) {
-console.log("❌ Données invalides");
-return res.sendStatus(200);
-}
-
-// 🔍 AUTO-DÉTECTION OPÉRATEUR
-const operator = await detectOperator(phone);
-
-pendingRecharges.push({
-orderId: order.id,
-orderNumber: order.order_number,
-phone,
-amount,
-operatorId: operator.operatorId,
-operatorName: operator.name,
-status: "PENDING"
-});
-
-console.log("⏸️ Recharge en attente :", order.id);
-res.sendStatus(200);
-} catch (err) {
-console.error("❌ Erreur webhook :", err.response?.data || err.message);
-res.sendStatus(200);
-}
-});
-
-// =====================
-// PAGE ADMIN – EN ATTENTE
-// =====================
-app.get("/pending-recharges", (req, res) => {
-res.json(pendingRecharges.filter(r => r.status === "PENDING"));
-});
-
-// =====================
-// CONFIRMER RECHARGE
-// =====================
-app.get("/confirm/:orderId", async (req, res) => {
-const recharge = pendingRecharges.find(
-r => r.orderId == req.params.orderId
-);
-
-if (!recharge) {
-return res.status(404).send("❌ Commande introuvable");
-}
-
-try {
-const token = await getReloadlyToken();
-
-const result = await axios.post(
-`${RELOADLY_BASE}/topups`,
+// 2️⃣ Recharge
+const topupRes = await axios.post(
+`${TOPUP_BASE}/topups`,
 {
-operatorId: recharge.operatorId,
-amount: recharge.amount,
+operatorId,
+amount: Number(data.amount),
+useLocalAmount: false,
 recipientPhone: {
 countryCode: "HT",
-number: recharge.phone.replace("+509", "")
+number: data.phone.replace("509", "")
 }
 },
 {
@@ -173,30 +140,25 @@ Accept: "application/com.reloadly.topups-v1+json",
 }
 );
 
-recharge.status = "COMPLETED";
+delete pendingRecharges[req.params.orderId];
 
-console.log("✅ Recharge effectuée :", recharge.orderId);
+console.log("✅ Recharge effectuée :", topupRes.data.transactionId);
+res.json({ success: true, transaction: topupRes.data });
 
-res.json({
-success: true,
-orderId: recharge.orderId,
-operator: recharge.operatorName,
-amount: recharge.amount,
-reloadly: result.data
-});
 } catch (err) {
 console.error("❌ Erreur recharge :", err.response?.data || err.message);
 res.status(500).send("Erreur recharge");
 }
 });
 
-// =====================
-// TEST SERVEUR
-// =====================
+// ===============================
+// ROOT
+// ===============================
 app.get("/", (req, res) => {
-res.send("🚀 Serveur Reloadly actif");
+res.send("✅ Reloadly Shopify Server actif");
 });
 
-app.listen(PORT, () => {
-console.log(`🚀 Serveur actif sur port ${PORT}`);
-});
+// ===============================
+app.listen(PORT, () =>
+console.log("🚀 Serveur lancé sur port", PORT)
+);
