@@ -136,10 +136,18 @@ const token = auth.data.access_token;
 /* =========================
 AUTO-DÉTECTION OPÉRATEUR
 ========================= */
+const baseUrl =
+RELOADLY_ENV === "sandbox"
+? "https://topups-sandbox.reloadly.com"
+: "https://topups.reloadly.com";
+
 const detect = await axios.get(
-`https://topups.reloadly.com/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
+`${baseUrl}/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
 {
-headers: { Authorization: `Bearer ${token}` },
+headers: {
+Authorization: `Bearer ${token}`,
+Accept: "application/com.reloadly.topups-v1+json",
+},
 }
 );
 
@@ -191,3 +199,4 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
