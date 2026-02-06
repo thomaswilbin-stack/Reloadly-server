@@ -116,29 +116,23 @@ return res.status(200).send("Invalid phone");
 }
 
 /* ===== AUTH RELOADLY ===== */
-async function getReloadlyToken() {
-  if (reloadlyToken) return reloadlyToken;
+import dotenv from "dotenv";
+import { ReloadlyClient } from "@reloadly/reloadly-sdk";
 
-  const audience =
- process.env.RELOADLY_ENV === "production"
-? "https://topups.reloadly.com"
- : "https://topups-sandbox.reloadly.com";
+dotenv.config();
 
-  const res = await axios.post(
-"https://auth.reloadly.com/oauth/token",
-    {
-client_id: process.env.RELOADLY_CLIENT_ID,
-client_secret: process.env.RELOADLY_CLIENT_SECRET,
-grant_type: "client_credentials",audience
-
-    },
-  { headers: { "Content-Type": "application/json" } }
- );
-reloadlyToken = res.data.access_token;
-console.log("🔐 Reloadly authentifié");
-return reloadlyToken;
+if (!process.env.RELOADLY_CLIENT_ID || !process.env.RELOADLY_CLIENT_SECRET) {
+throw new Error("❌ Reloadly PRODUCTION credentials missing");
 }
 
+const reloadlyClient = new ReloadlyClient({
+clientId: process.env.RELOADLY_CLIENT_ID,
+clientSecret: process.env.RELOADLY_CLIENT_SECRET,
+environment: "production", // ✅ PRODUCTION
+baseURL: "https://auth.reloadly.com" // ✅ FIX DÉFINITIF
+});
+
+export default reloadlyClient;
 /* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
 const detectRes = await axios.get(
 `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
@@ -198,6 +192,7 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
 
 
 
