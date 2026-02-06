@@ -115,36 +115,22 @@ console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
-/* =========================
-TOKEN RELOADLY
-========================= */
-const auth = await axios.post(
-"https://auth.reloadly.com/oauth/token",
-{
-client_id: RELOADLY_CLIENT_ID,
-client_secret: RELOADLY_CLIENT_SECRET,
-grant_type: "client_credentials",
-audience:
-RELOADLY_ENV === "sandbox"
-? "https://topups-sandbox.reloadly.com"
-: "https://topups.reloadly.com",
-}
-);
+* ===== AUTH RELOADLY ===== */
+const token = await getReloadlyToken();
 
-const token = auth.data.access_token;
-
-/* =========================
-AUTO-DÉTECTION OPÉRATEUR
-========================= */
+/* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
 const detectRes = await axios.get(
 `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
+{
 headers: {
 Authorization: `Bearer ${token}`,
 Accept: "application/com.reloadly.topups-v1+json",
+},
 }
+);
 
-const operatorId = detect.data.operatorId;
-console.log("📡 Opérateur détecté:", detect.data.name);
+const operatorId = detectRes.data.operatorId;
+console.log("📡 Opérateur détecté:", detectRes.data.name);
 
 /* =========================
 RECHARGE
@@ -191,3 +177,4 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
