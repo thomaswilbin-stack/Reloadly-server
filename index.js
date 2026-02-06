@@ -14,19 +14,19 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
 /* =========================
-MEMOIRE ANTI-DOUBLON (RAM)
+ANTI-DOUBLON (RAM)
 ========================= */
-const processedOrders = new Set();
+const processedKeys = new Set();
 
 /* =========================
-WEBHOOK SHOPIFY
+WEBHOOK SHOPIFY PAYÉ
 ========================= */
 app.post(
 "/webhook",
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
-/* ===== Vérification HMAC ===== */
+/* ===== HMAC SHOPIFY ===== */
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const body = req.body.toString("utf8");
 
@@ -42,39 +42,51 @@ return res.status(401).send("Unauthorized");
 
 const data = JSON.parse(body);
 
-/* ===== CLÉ UNIQUE ANTI-DOUBLON 🔧 FIX ===== */
+/* ===== CLÉ UNIQUE ANTI-DOUBLON ===== */
 const uniqueKey =
 data.checkout_id ||
 data.order_number ||
 data.id;
 
-console.log("✅ Webhook PAYÉ reçu");
+console.log("\n✅ Webhook PAYÉ reçu");
 console.log("🧾 Order ID:", data.id);
 console.log("🧩 Checkout ID:", data.checkout_id);
 console.log("🔑 Clé anti-doublon:", uniqueKey);
 
-/* ===== ANTI-DOUBLON ABSOLU ===== */
-if (processedOrders.has(uniqueKey)) {
+if (processedKeys.has(uniqueKey)) {
 console.log("🛑 Doublon détecté → ignoré");
 return res.status(200).send("Already processed");
 }
+processedKeys.add(uniqueKey);
 
-processedOrders.add(uniqueKey);
+/* ===== NUMÉRO (TOUTES SOURCES SHOPIFY) ===== */
+const phone =
+data.note_attributes?.find(n => n.name === "phone")?.value ||
+data.line_items?.[0]?.properties?.find(p => p.name === "phone")?.value ||
+data.customer?.phone ||
+data.billing_address?.phone ||
+null;
 
-/* ===== DONNÉES COMMANDE ===== */
-const phone = data.note_attributes?.find(
-(n) => n.name === "phone"
-)?.value;
+/* ===== MONTANT ===== */
+const amount =
+Number(data.line_items?.[0]?.price) ||
+Number(data.total_price) ||
+null;
 
-const amount = data.line_items?.[0]?.price;
+console.log("📱 Numéro détecté:", phone);
+console.log("💰 Montant détecté:", amount);
 
-if (!phone || !amount) {
+if (!phone || !amount || amount <= 0) {
 console.log("❌ Données manquantes");
 return res.status(200).send("Missing data");
 }
 
-console.log("📱 Numéro:", phone);
-console.log("💰 Montant:", amount);
+/* ===== FORMAT NUMÉRO ===== */
+const cleanPhone = phone.replace(/\D/g, "");
+if (!cleanPhone.startsWith("509")) {
+console.log("❌ Numéro invalide");
+return res.status(200).send("Invalid phone");
+}
 
 /* ===== TOKEN RELOADLY ===== */
 const auth = await axios.post(
@@ -92,9 +104,7 @@ RELOADLY_ENV === "sandbox"
 
 const token = auth.data.access_token;
 
-/* ===== DÉTECTION OPÉRATEUR ===== */
-const cleanPhone = phone.replace("+", "");
-
+/* ===== AUTO-DÉTECTION OPÉRATEUR ===== */
 const detect = await axios.get(
 `https://topups.reloadly.com/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
 {
@@ -116,7 +126,7 @@ recipientPhone: {
 countryCode: "HT",
 number: cleanPhone,
 },
-customIdentifier: uniqueKey, // 🔒 anti-doublon Reloadly aussi
+customIdentifier: uniqueKey, // 🔒 Reloadly anti-doublon
 },
 {
 headers: { Authorization: `Bearer ${token}` },
@@ -128,9 +138,9 @@ console.log("🆔 Transaction:", topup.data.transactionId);
 
 return res.status(200).send("OK");
 } catch (err) {
-console.error("❌ Erreur:", err.response?.data || err.message);
+console.error("❌ Erreur recharge:", err.response?.data || err.message);
 
-// ⚠️ Toujours 200 pour éviter retry Shopify
+// ⚠️ Toujours répondre 200 pour éviter retry Shopify
 return res.status(200).send("Handled");
 }
 }
