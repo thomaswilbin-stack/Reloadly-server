@@ -5,7 +5,9 @@ import axios from "axios";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 🔐 Capture du body brut pour Shopify
+/* =========================================================
+1️⃣ Shopify RAW BODY (OBLIGATOIRE)
+========================================================= */
 app.use(
 express.json({
 verify: (req, res, buf) => {
@@ -14,12 +16,19 @@ req.rawBody = buf;
 })
 );
 
-// 🔒 Anti-doublon en mémoire
-const processing = new Set();
+/* =========================================================
+2️⃣ Mémoire anti-doublon (idempotence)
+👉 clé = checkout_id (le plus fiable)
+========================================================= */
+const processedCheckouts = new Set();
 
-// 🔐 Vérification signature Shopify
+/* =========================================================
+3️⃣ Vérification HMAC Shopify
+========================================================= */
 function verifyShopifyWebhook(req) {
 const hmac = req.get("X-Shopify-Hmac-Sha256");
+if (!hmac) return false;
+
 const digest = crypto
 .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
 .update(req.rawBody)
@@ -31,48 +40,62 @@ Buffer.from(digest, "utf8")
 );
 }
 
-// 🟢 Health check
+/* =========================================================
+4️⃣ Health check
+========================================================= */
 app.get("/", (req, res) => {
 res.send("Reloadly server running");
 });
 
-// 🟣 WEBHOOK SHOPIFY PAYÉ
+/* =========================================================
+5️⃣ WEBHOOK SHOPIFY — COMMANDE PAYÉE
+========================================================= */
 app.post("/webhook/shopify-paid", async (req, res) => {
-try {
-console.log("📥 Webhook Shopify reçu");
+console.log("\n📥 Webhook Shopify PAYÉ reçu");
 
+/* --- Sécurité Shopify --- */
 if (!verifyShopifyWebhook(req)) {
 console.log("❌ Signature Shopify invalide");
-return res.status(401).send("Invalid HMAC");
+return res.status(401).send("Invalid signature");
 }
 
 const order = req.body;
-const lockKey = `checkout-${order.checkout_id}`;
 
-// 🔒 Anti-doublon serveur
-if (processing.has(lockKey)) {
-console.log("🔒 Recharge déjà en cours — bloquée");
-return res.status(200).send("Already processing");
+const checkoutId = order.checkout_id;
+const orderId = order.id;
+
+console.log("🧾 Commande ID:", orderId);
+console.log("🧩 Checkout ID:", checkoutId);
+
+/* --- Anti-doublon ABSOLU --- */
+if (processedCheckouts.has(checkoutId)) {
+console.log("🔒 Doublon détecté — recharge BLOQUÉE");
+return res.status(200).send("Already processed");
 }
 
-processing.add(lockKey);
+/* --- Verrou immédiat (AVANT Reloadly) --- */
+processedCheckouts.add(checkoutId);
 
+try {
+/* =====================================================
+Données client
+===================================================== */
 const phone = order?.note_attributes?.find(
 (a) => a.name === "phone"
 )?.value;
 
-const amount = parseFloat(order?.line_items?.[0]?.price);
-
-if (!phone || !amount) {
-console.log("❌ Données invalides", phone, amount);
-processing.delete(lockKey);
-return res.status(400).send("Invalid data");
-}
+const amount = Number(order?.line_items?.[0]?.price);
 
 console.log("📱 Numéro reçu:", phone);
 console.log("💰 Montant reçu:", amount);
 
-// 🔑 Auth Reloadly
+if (!phone || !amount || isNaN(amount)) {
+throw new Error("Données invalides");
+}
+
+/* =====================================================
+Auth Reloadly
+===================================================== */
 const auth = await axios.post(
 "https://auth.reloadly.com/oauth/token",
 {
@@ -85,31 +108,35 @@ audience: "https://topups.reloadly.com",
 
 const token = auth.data.access_token;
 
-// 📡 Détection opérateur automatique
-const detected = await axios.get(
-`https://topups.reloadly.com/operators/auto-detect/phone/${phone.replace(
-"+",
-""
-)}?countryCode=HT`,
+/* =====================================================
+Détection opérateur automatique
+===================================================== */
+const cleanPhone = phone.replace("+509", "");
+
+const detect = await axios.get(
+`https://topups.reloadly.com/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
 {
 headers: { Authorization: `Bearer ${token}` },
 }
 );
 
-const operatorId = detected.data.operatorId;
-console.log("📡 Opérateur détecté:", detected.data.name);
+const operatorId = detect.data.operatorId;
+console.log("📡 Opérateur détecté:", detect.data.name);
 
-// 💸 Recharge automatique
+/* =====================================================
+Recharge automatique
+👉 customIdentifier = checkoutId (clé anti-doublon Reloadly)
+===================================================== */
 const recharge = await axios.post(
 "https://topups.reloadly.com/topups",
 {
 operatorId,
 amount,
 useLocalAmount: true,
-customIdentifier: lockKey,
+customIdentifier: checkoutId,
 recipientPhone: {
 countryCode: "HT",
-number: phone.replace("+509", ""),
+number: cleanPhone,
 },
 },
 {
@@ -120,15 +147,27 @@ headers: { Authorization: `Bearer ${token}` },
 console.log("🎉 RECHARGE RÉUSSIE");
 console.log("🆔 Transaction:", recharge.data.transactionId);
 
-res.status(200).send("OK");
+return res.status(200).send("OK");
 } catch (err) {
-console.error("❌ Erreur recharge:", err.response?.data || err.message);
-res.status(500).send("Error");
-} finally {
-processing.clear();
+console.error(
+"❌ Erreur recharge:",
+err.response?.data || err.message
+);
+
+/*
+⚠️ IMPORTANT
+On NE retire PAS le checkoutId du Set
+👉 même si Reloadly retourne une erreur temporaire,
+Shopify ne pourra PAS déclencher un doublon
+*/
+
+return res.status(200).send("Processed");
 }
 });
 
+/* =========================================================
+6️⃣ Lancement serveur
+========================================================= */
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
