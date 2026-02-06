@@ -115,7 +115,7 @@ console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
-* ===== AUTH RELOADLY ===== */
+/* ===== AUTH RELOADLY ===== */
 const token = await getReloadlyToken();
 
 /* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
@@ -177,4 +177,5 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
 
