@@ -116,7 +116,21 @@ return res.status(200).send("Invalid phone");
 }
 
 /* ===== AUTH RELOADLY ===== */
-const token = await getReloadlyToken();
+async function getReloadlyToken() {
+const res = await axios.post(
+`${RELOADLY_ENV}/oauth/token`,
+{
+client_id: RELOADLY_CLIENT_ID,
+client_secret: RELOADLY_CLIENT_SECRET,
+grant_type: "client_credentials",
+audience: "https://topups.reloadly.com"
+},
+{ headers: { "Content-Type": "application/json" }
+}
+);
+
+return res.data.access_token;
+}
 
 /* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
 const detectRes = await axios.get(
@@ -177,5 +191,6 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
 
 
