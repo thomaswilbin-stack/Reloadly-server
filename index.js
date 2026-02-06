@@ -14,7 +14,7 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
 /* =========================
-ANTI-DOUBLON ABSOLU
+ANTI-DOUBLON (RAM)
 ========================= */
 const processedKeys = new Set();
 
@@ -42,11 +42,11 @@ return res.status(401).send("Unauthorized");
 
 const data = JSON.parse(body);
 
-/* ===== CLÉ UNIQUE ANTI-DOUBLON ===== */
+/* ===== Clé anti-doublon ===== */
 const uniqueKey =
 data.checkout_id ||
 data.id ||
-data.order_number;
+`${data.id}-${data.created_at}`;
 
 console.log("\n✅ Webhook PAYÉ reçu");
 console.log("🧾 Order ID:", data.id);
@@ -59,29 +59,44 @@ return res.status(200).send("Already processed");
 }
 processedKeys.add(uniqueKey);
 
-/* ===== DÉTECTION NUMÉRO (100 %) ===== */
-const phone =
-data.phone || // ✅ CAS LE PLUS FRÉQUENT (ORDER PHONE)
-data.note_attributes?.find(n =>
-["phone", "numero", "numéro"].includes(
-n.name?.toLowerCase()
-)
-)?.value ||
-data.line_items?.[0]?.properties?.find(p =>
-["phone", "numero", "numéro"].includes(
-p.name?.toLowerCase()
-)
-)?.value ||
-data.shipping_address?.phone ||
-data.billing_address?.phone ||
-data.customer?.phone ||
-data.customer?.default_address?.phone ||
-null;
+/* =========================
+NUMÉRO (CHAMP PRODUIT)
+========================= */
+let phone = null;
 
-/* ===== MONTANT ===== */
+if (Array.isArray(data.line_items)) {
+for (const item of data.line_items) {
+if (!Array.isArray(item.properties)) continue;
+
+for (const prop of item.properties) {
+const key = (prop.name || "")
+.toLowerCase()
+.normalize("NFD")
+.replace(/[\u0300-\u036f]/g, "");
+
+if (
+key.includes("numero") ||
+key.includes("phone") ||
+key.includes("telephone")
+) {
+if (prop.value && prop.value.trim() !== "") {
+phone = prop.value.trim();
+break;
+}
+}
+}
+if (phone) break;
+}
+}
+
+/* =========================
+MONTANT (OFFICIEL)
+========================= */
 const amount =
-Number(data.line_items?.[0]?.price) ||
+Number(data.current_total_price) ||
 Number(data.total_price) ||
+Number(data.subtotal_price) ||
+Number(data.line_items?.[0]?.price) ||
 null;
 
 console.log("📱 Numéro détecté:", phone);
@@ -92,7 +107,7 @@ console.log("❌ Données manquantes");
 return res.status(200).send("Missing data");
 }
 
-/* ===== FORMAT NUMÉRO ===== */
+/* ===== Format numéro ===== */
 const cleanPhone = phone.replace(/\D/g, "");
 
 if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
@@ -100,7 +115,9 @@ console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
-/* ===== TOKEN RELOADLY ===== */
+/* =========================
+TOKEN RELOADLY
+========================= */
 const auth = await axios.post(
 "https://auth.reloadly.com/oauth/token",
 {
@@ -116,7 +133,9 @@ RELOADLY_ENV === "sandbox"
 
 const token = auth.data.access_token;
 
-/* ===== AUTO-DÉTECTION OPÉRATEUR ===== */
+/* =========================
+AUTO-DÉTECTION OPÉRATEUR
+========================= */
 const detect = await axios.get(
 `https://topups.reloadly.com/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
 {
@@ -127,7 +146,9 @@ headers: { Authorization: `Bearer ${token}` },
 const operatorId = detect.data.operatorId;
 console.log("📡 Opérateur détecté:", detect.data.name);
 
-/* ===== RECHARGE ===== */
+/* =========================
+RECHARGE
+========================= */
 const topup = await axios.post(
 "https://topups.reloadly.com/topups",
 {
@@ -138,7 +159,7 @@ recipientPhone: {
 countryCode: "HT",
 number: cleanPhone,
 },
-customIdentifier: uniqueKey, // 🔒 Reloadly anti-doublon
+customIdentifier: uniqueKey, // sécurité anti-duplication Reloadly
 },
 {
 headers: { Authorization: `Bearer ${token}` },
@@ -151,8 +172,7 @@ console.log("🆔 Transaction:", topup.data.transactionId);
 return res.status(200).send("OK");
 } catch (err) {
 console.error("❌ Erreur recharge:", err.response?.data || err.message);
-
-// IMPORTANT : répondre 200 pour bloquer retry Shopify
+// Toujours 200 pour éviter retry Shopify
 return res.status(200).send("Handled");
 }
 }
@@ -166,7 +186,7 @@ res.send("Reloadly server running");
 });
 
 /* =========================
-START SERVER
+START
 ========================= */
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
