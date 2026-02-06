@@ -14,7 +14,7 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
 /* =========================
-ANTI-DOUBLON (RAM)
+ANTI-DOUBLON ABSOLU
 ========================= */
 const processedKeys = new Set();
 
@@ -26,7 +26,7 @@ app.post(
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
-/* ===== HMAC SHOPIFY ===== */
+/* ===== Vérification HMAC ===== */
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const body = req.body.toString("utf8");
 
@@ -45,8 +45,8 @@ const data = JSON.parse(body);
 /* ===== CLÉ UNIQUE ANTI-DOUBLON ===== */
 const uniqueKey =
 data.checkout_id ||
-data.order_number ||
-data.id;
+data.id ||
+data.order_number;
 
 console.log("\n✅ Webhook PAYÉ reçu");
 console.log("🧾 Order ID:", data.id);
@@ -59,12 +59,23 @@ return res.status(200).send("Already processed");
 }
 processedKeys.add(uniqueKey);
 
-/* ===== NUMÉRO (TOUTES SOURCES SHOPIFY) ===== */
+/* ===== DÉTECTION NUMÉRO (100 %) ===== */
 const phone =
-data.note_attributes?.find(n => n.name === "phone")?.value ||
-data.line_items?.[0]?.properties?.find(p => p.name === "phone")?.value ||
-data.customer?.phone ||
+data.phone || // ✅ CAS LE PLUS FRÉQUENT (ORDER PHONE)
+data.note_attributes?.find(n =>
+["phone", "numero", "numéro"].includes(
+n.name?.toLowerCase()
+)
+)?.value ||
+data.line_items?.[0]?.properties?.find(p =>
+["phone", "numero", "numéro"].includes(
+p.name?.toLowerCase()
+)
+)?.value ||
+data.shipping_address?.phone ||
 data.billing_address?.phone ||
+data.customer?.phone ||
+data.customer?.default_address?.phone ||
 null;
 
 /* ===== MONTANT ===== */
@@ -83,8 +94,9 @@ return res.status(200).send("Missing data");
 
 /* ===== FORMAT NUMÉRO ===== */
 const cleanPhone = phone.replace(/\D/g, "");
-if (!cleanPhone.startsWith("509")) {
-console.log("❌ Numéro invalide");
+
+if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
+console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
@@ -140,7 +152,7 @@ return res.status(200).send("OK");
 } catch (err) {
 console.error("❌ Erreur recharge:", err.response?.data || err.message);
 
-// ⚠️ Toujours répondre 200 pour éviter retry Shopify
+// IMPORTANT : répondre 200 pour bloquer retry Shopify
 return res.status(200).send("Handled");
 }
 }
