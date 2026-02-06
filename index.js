@@ -14,20 +14,19 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
 /* =========================
-MEMOIRE ANTI-DOUBLON
-(Render garde ça en RAM)
+MEMOIRE ANTI-DOUBLON (RAM)
 ========================= */
 const processedOrders = new Set();
 
 /* =========================
-RAW BODY (OBLIGATOIRE)
+WEBHOOK SHOPIFY
 ========================= */
 app.post(
 "/webhook",
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
-/* ===== Vérification HMAC Shopify ===== */
+/* ===== Vérification HMAC ===== */
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const body = req.body.toString("utf8");
 
@@ -43,13 +42,16 @@ return res.status(401).send("Unauthorized");
 
 const data = JSON.parse(body);
 
-const orderId = data.id;
-const checkoutId = data.checkout_id;
-const uniqueKey = `${orderId}-${checkoutId}`;
+/* ===== CLÉ UNIQUE ANTI-DOUBLON 🔧 FIX ===== */
+const uniqueKey =
+data.checkout_id ||
+data.order_number ||
+data.id;
 
 console.log("✅ Webhook PAYÉ reçu");
-console.log("Commande:", orderId);
-console.log("Checkout:", checkoutId);
+console.log("🧾 Order ID:", data.id);
+console.log("🧩 Checkout ID:", data.checkout_id);
+console.log("🔑 Clé anti-doublon:", uniqueKey);
 
 /* ===== ANTI-DOUBLON ABSOLU ===== */
 if (processedOrders.has(uniqueKey)) {
@@ -59,7 +61,7 @@ return res.status(200).send("Already processed");
 
 processedOrders.add(uniqueKey);
 
-/* ===== Récupération données ===== */
+/* ===== DONNÉES COMMANDE ===== */
 const phone = data.note_attributes?.find(
 (n) => n.name === "phone"
 )?.value;
@@ -74,7 +76,7 @@ return res.status(200).send("Missing data");
 console.log("📱 Numéro:", phone);
 console.log("💰 Montant:", amount);
 
-/* ===== TOKEN Reloadly ===== */
+/* ===== TOKEN RELOADLY ===== */
 const auth = await axios.post(
 "https://auth.reloadly.com/oauth/token",
 {
@@ -90,7 +92,7 @@ RELOADLY_ENV === "sandbox"
 
 const token = auth.data.access_token;
 
-/* ===== Auto-détection opérateur ===== */
+/* ===== DÉTECTION OPÉRATEUR ===== */
 const cleanPhone = phone.replace("+", "");
 
 const detect = await axios.get(
@@ -101,10 +103,9 @@ headers: { Authorization: `Bearer ${token}` },
 );
 
 const operatorId = detect.data.operatorId;
+console.log("📡 Opérateur détecté:", detect.data.name);
 
-console.log("📡 Opérateur:", detect.data.name);
-
-/* ===== Recharge ===== */
+/* ===== RECHARGE ===== */
 const topup = await axios.post(
 "https://topups.reloadly.com/topups",
 {
@@ -115,7 +116,7 @@ recipientPhone: {
 countryCode: "HT",
 number: cleanPhone,
 },
-customIdentifier: uniqueKey, // 🔒 sécurité supplémentaire Reloadly
+customIdentifier: uniqueKey, // 🔒 anti-doublon Reloadly aussi
 },
 {
 headers: { Authorization: `Bearer ${token}` },
@@ -123,13 +124,13 @@ headers: { Authorization: `Bearer ${token}` },
 );
 
 console.log("🎉 RECHARGE RÉUSSIE");
-console.log("Transaction:", topup.data.transactionId);
+console.log("🆔 Transaction:", topup.data.transactionId);
 
 return res.status(200).send("OK");
 } catch (err) {
 console.error("❌ Erreur:", err.response?.data || err.message);
 
-// ⚠️ ON RÉPOND TOUJOURS 200 POUR ÉVITER RETRY SHOPIFY
+// ⚠️ Toujours 200 pour éviter retry Shopify
 return res.status(200).send("Handled");
 }
 }
@@ -143,7 +144,7 @@ res.send("Reloadly server running");
 });
 
 /* =========================
-START
+START SERVER
 ========================= */
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
