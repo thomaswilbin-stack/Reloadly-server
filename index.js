@@ -116,23 +116,19 @@ return res.status(200).send("Invalid phone");
 }
 
 /* ===== AUTH RELOADLY ===== */
-import dotenv from "dotenv";
-import { ReloadlyClient } from "@reloadly/reloadly-sdk";
-
-dotenv.config();
-
-if (!process.env.RELOADLY_CLIENT_ID || !process.env.RELOADLY_CLIENT_SECRET) {
-throw new Error("❌ Reloadly PRODUCTION credentials missing");
+async function getReloadlyToken() {
+ const res = await axios.post(
+ "https://auth.reloadly.com/oauth/token",
+ {
+  client_id: RELOADLY_CLIENT_ID,
+client_secret: RELOADLY_CLIENT_SECRET,
+ grant_type: "client_credentials",
+ audience: RELOADLY_BASE_URL,
+ },
+ { headers: { "Content-Type": "application/json" } }
+ );
+  return res.data.access_token;
 }
-
-const reloadlyClient = new ReloadlyClient({
-clientId: process.env.RELOADLY_CLIENT_ID,
-clientSecret: process.env.RELOADLY_CLIENT_SECRET,
-environment: "production", // ✅ PRODUCTION
-baseURL: "https://auth.reloadly.com" // ✅ FIX DÉFINITIF
-});
-
-export default reloadlyClient;
 /* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
 const detectRes = await axios.get(
 `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
@@ -192,6 +188,7 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
 
 
 
