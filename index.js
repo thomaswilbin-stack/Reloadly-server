@@ -13,7 +13,9 @@ const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
-/* ===== BASE URL RELOADLY (FIX) ===== */
+/* =========================
+BASE URL RELOADLY (NE PAS METTRE EN ENV)
+========================= */
 const RELOADLY_BASE_URL =
 RELOADLY_ENV === "sandbox"
 ? "https://topups-sandbox.reloadly.com"
@@ -32,7 +34,7 @@ app.post(
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
-/* ===== Vérification HMAC ===== */
+/* ===== Vérification HMAC Shopify ===== */
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const body = req.body.toString("utf8");
 
@@ -63,7 +65,7 @@ return res.status(200).send("Already processed");
 processedKeys.add(uniqueKey);
 
 /* =========================
-NUMÉRO (CHAMP PRODUIT)
+NUMÉRO (CHAMP PRODUIT SHOPIFY)
 ========================= */
 let phone = null;
 
@@ -95,7 +97,11 @@ if (phone) break;
 /* =========================
 MONTANT
 ========================= */
-const amount = Number(data.current_total_price || data.total_price);
+const amount = Number(
+data.current_total_price ||
+data.total_price ||
+data.subtotal_price
+);
 
 console.log("📱 Numéro détecté:", phone);
 console.log("💰 Montant détecté:", amount);
@@ -105,15 +111,16 @@ console.log("❌ Données manquantes");
 return res.status(200).send("Missing data");
 }
 
-/* ===== Format numéro ===== */
+/* ===== Nettoyage numéro ===== */
 const cleanPhone = phone.replace(/\D/g, "");
+
 if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
 console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
 /* =========================
-AUTH RELOADLY (FIX)
+AUTH RELOADLY
 ========================= */
 const authRes = await axios.post(
 "https://auth.reloadly.com/oauth/token",
@@ -129,17 +136,20 @@ audience: RELOADLY_BASE_URL,
 const token = authRes.data.access_token;
 
 /* =========================
-AUTO-DETECT OPÉRATEUR (FIX)
+AUTO-DETECT OPÉRATEUR (LOG CRUCIAL)
 ========================= */
-const detectRes = await axios.get(
-`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
-{
+const detectUrl =
+`${RELOADLY_BASE_URL}` +
+`/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`;
+
+console.log("🔎 URL AUTO-DETECT UTILISÉE:", detectUrl);
+
+const detectRes = await axios.get(detectUrl, {
 headers: {
 Authorization: `Bearer ${token}`,
 Accept: "application/com.reloadly.topups-v1+json",
 },
-}
-);
+});
 
 const operatorId = detectRes.data.operatorId;
 console.log("📡 Opérateur détecté:", detectRes.data.name);
