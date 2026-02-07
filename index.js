@@ -1,6 +1,7 @@
 import express from "express";
 import crypto from "crypto";
 import axios from "axios";
+import Database from "better-sqlite3";
 
 const app = express();
 
@@ -22,9 +23,16 @@ RELOADLY_ENV === "sandbox"
 : "https://topups.reloadly.com";
 
 /* =========================
-ANTI-DOUBLON (RAM)
+SQLITE — ANTI-DOUBLON PERSISTANT
 ========================= */
-const processedKeys = new Set();
+const db = new Database("anti-doublon.db");
+
+db.prepare(`
+CREATE TABLE IF NOT EXISTS processed_orders (
+id TEXT PRIMARY KEY,
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+`).run();
 
 /* =========================
 WEBHOOK SHOPIFY PAYÉ
@@ -50,7 +58,7 @@ return res.status(401).send("Unauthorized");
 
 const data = JSON.parse(body);
 
-/* ===== Clé anti-doublon ===== */
+/* ===== Clé anti-doublon persistante ===== */
 const uniqueKey = data.checkout_id || data.id;
 
 console.log("\n✅ Webhook PAYÉ reçu");
@@ -58,11 +66,14 @@ console.log("🧾 Order ID:", data.id);
 console.log("🧩 Checkout ID:", data.checkout_id);
 console.log("🔑 Clé anti-doublon:", uniqueKey);
 
-if (processedKeys.has(uniqueKey)) {
-console.log("🛑 Doublon détecté → ignoré");
+const alreadyProcessed = db
+.prepare("SELECT id FROM processed_orders WHERE id = ?")
+.get(uniqueKey);
+
+if (alreadyProcessed) {
+console.log("🛑 Doublon PERSISTANT détecté → ignoré");
 return res.status(200).send("Already processed");
 }
-processedKeys.add(uniqueKey);
 
 /* =========================
 NUMÉRO (CHAMP PRODUIT)
@@ -136,7 +147,7 @@ audience: RELOADLY_BASE_URL,
 const token = authRes.data.access_token;
 
 /* =========================
-AUTO-DETECT OPÉRATEUR
+AUTO-DETECT OPÉRATEUR (HT OK)
 ========================= */
 const detectUrl =
 `${RELOADLY_BASE_URL}` +
@@ -153,6 +164,7 @@ Accept: "application/com.reloadly.topups-v1+json",
 
 const operatorId = detectRes.data.operatorId;
 console.log("📡 Opérateur détecté:", detectRes.data.name);
+
 /* =========================
 RECHARGE
 ========================= */
@@ -176,6 +188,10 @@ headers: { Authorization: `Bearer ${token}` },
 console.log("🎉 RECHARGE RÉUSSIE");
 console.log("🆔 Transaction:", topup.data.transactionId);
 
+/* ===== Enregistrement PERSISTANT ===== */
+db.prepare("INSERT INTO processed_orders (id) VALUES (?)")
+.run(uniqueKey);
+
 return res.status(200).send("OK");
 } catch (err) {
 console.error("❌ Erreur recharge:", err.response?.data || err.message);
@@ -195,7 +211,6 @@ res.send("Reloadly server running");
 START
 ========================= */
 app.listen(PORT, () => {
-console.log("🔥 VERSION INDEX FINALE — AUTO-DETECT CORRECT");
+console.log("🔥 VERSION INDEX FINALE — ANTI-DOUBLON PERSISTANT");
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
-
