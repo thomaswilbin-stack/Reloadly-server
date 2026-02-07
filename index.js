@@ -14,7 +14,7 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
 /* =========================
-BASE URL RELOADLY (NE PAS METTRE EN ENV)
+BASE URL RELOADLY
 ========================= */
 const RELOADLY_BASE_URL =
 RELOADLY_ENV === "sandbox"
@@ -65,7 +65,7 @@ return res.status(200).send("Already processed");
 processedKeys.add(uniqueKey);
 
 /* =========================
-NUMÉRO (CHAMP PRODUIT SHOPIFY)
+NUMÉRO (CHAMP PRODUIT)
 ========================= */
 let phone = null;
 
@@ -136,7 +136,7 @@ audience: RELOADLY_BASE_URL,
 const token = authRes.data.access_token;
 
 /* =========================
-AUTO-DETECT OPÉRATEUR (LOG CRUCIAL)
+AUTO-DETECT OPÉRATEUR
 ========================= */
 const detectUrl =
 `${RELOADLY_BASE_URL}` +
@@ -196,5 +196,6 @@ res.send("Reloadly server running");
 START
 ========================= */
 app.listen(PORT, () => {
+console.log("🔥 VERSION INDEX FINALE — AUTO-DETECT CORRECT");
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
