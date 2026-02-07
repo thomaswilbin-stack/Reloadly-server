@@ -140,7 +140,7 @@ AUTO-DETECT OPÉRATEUR
 ========================= */
 const detectUrl =
 `${RELOADLY_BASE_URL}` +
-`/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`;
+`/operators/auto-detect/phone/${cleanPhone}/countries/HT`;
 
 console.log("🔎 URL AUTO-DETECT UTILISÉE:", detectUrl);
 
@@ -153,7 +153,6 @@ Accept: "application/com.reloadly.topups-v1+json",
 
 const operatorId = detectRes.data.operatorId;
 console.log("📡 Opérateur détecté:", detectRes.data.name);
-
 /* =========================
 RECHARGE
 ========================= */
@@ -199,3 +198,4 @@ app.listen(PORT, () => {
 console.log("🔥 VERSION INDEX FINALE — AUTO-DETECT CORRECT");
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
