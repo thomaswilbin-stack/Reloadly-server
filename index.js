@@ -13,6 +13,12 @@ const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_ENV = process.env.RELOADLY_ENV || "production";
 
+/* ===== BASE URL RELOADLY (FIX) ===== */
+const RELOADLY_BASE_URL =
+RELOADLY_ENV === "sandbox"
+? "https://topups-sandbox.reloadly.com"
+: "https://topups.reloadly.com";
+
 /* =========================
 ANTI-DOUBLON (RAM)
 ========================= */
@@ -43,10 +49,7 @@ return res.status(401).send("Unauthorized");
 const data = JSON.parse(body);
 
 /* ===== Clé anti-doublon ===== */
-const uniqueKey =
-data.checkout_id ||
-data.id ||
-`${data.id}-${data.created_at}`;
+const uniqueKey = data.checkout_id || data.id;
 
 console.log("\n✅ Webhook PAYÉ reçu");
 console.log("🧾 Order ID:", data.id);
@@ -90,14 +93,9 @@ if (phone) break;
 }
 
 /* =========================
-MONTANT (OFFICIEL)
+MONTANT
 ========================= */
-const amount =
-Number(data.current_total_price) ||
-Number(data.total_price) ||
-Number(data.subtotal_price) ||
-Number(data.line_items?.[0]?.price) ||
-null;
+const amount = Number(data.current_total_price || data.total_price);
 
 console.log("📱 Numéro détecté:", phone);
 console.log("💰 Montant détecté:", amount);
@@ -109,29 +107,32 @@ return res.status(200).send("Missing data");
 
 /* ===== Format numéro ===== */
 const cleanPhone = phone.replace(/\D/g, "");
-
 if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
 console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
-/* ===== AUTH RELOADLY ===== */
-async function getReloadlyToken() {
- const res = await axios.post(
- "https://auth.reloadly.com/oauth/token",
- {
-  client_id: RELOADLY_CLIENT_ID,
+/* =========================
+AUTH RELOADLY (FIX)
+========================= */
+const authRes = await axios.post(
+"https://auth.reloadly.com/oauth/token",
+{
+client_id: RELOADLY_CLIENT_ID,
 client_secret: RELOADLY_CLIENT_SECRET,
- grant_type: "client_credentials",
- audience: RELOADLY_BASE_URL,
- },
- { headers: { "Content-Type": "application/json" } }
- );
-  return res.data.access_token;
-}
-/* ===== AUTO-DETECT OPÉRATEUR (ENDPOINT CORRECT) ===== */
+grant_type: "client_credentials",
+audience: RELOADLY_BASE_URL,
+},
+{ headers: { "Content-Type": "application/json" } }
+);
+
+const token = authRes.data.access_token;
+
+/* =========================
+AUTO-DETECT OPÉRATEUR (FIX)
+========================= */
 const detectRes = await axios.get(
-`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
+`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
 {
 headers: {
 Authorization: `Bearer ${token}`,
@@ -147,7 +148,7 @@ console.log("📡 Opérateur détecté:", detectRes.data.name);
 RECHARGE
 ========================= */
 const topup = await axios.post(
-"https://topups.reloadly.com/topups",
+`${RELOADLY_BASE_URL}/topups`,
 {
 operatorId,
 amount: Number(amount),
@@ -156,7 +157,7 @@ recipientPhone: {
 countryCode: "HT",
 number: cleanPhone,
 },
-customIdentifier: uniqueKey, // sécurité anti-duplication Reloadly
+customIdentifier: uniqueKey,
 },
 {
 headers: { Authorization: `Bearer ${token}` },
@@ -169,7 +170,6 @@ console.log("🆔 Transaction:", topup.data.transactionId);
 return res.status(200).send("OK");
 } catch (err) {
 console.error("❌ Erreur recharge:", err.response?.data || err.message);
-// Toujours 200 pour éviter retry Shopify
 return res.status(200).send("Handled");
 }
 }
@@ -188,9 +188,3 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
-
-
-
-
-
-
