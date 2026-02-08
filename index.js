@@ -173,7 +173,7 @@ const token = auth.data.access_token;
 AUTO-DETECT OPÉRATEUR
 ========================= */
 const detect = await axios.get(
-`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
+`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}?countries/HT`,
 {
 headers: {
 Authorization: `Bearer ${token}`,
@@ -237,3 +237,4 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
