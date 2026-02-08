@@ -34,14 +34,14 @@ created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 `);
 
 /* =========================
-WEBHOOK SHOPIFY
+WEBHOOK SHOPIFY PAYÉ
 ========================= */
 app.post(
 "/webhook",
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
-/* ===== HMAC ===== */
+/* ===== Vérification HMAC ===== */
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const body = req.body.toString("utf8");
 
@@ -58,54 +58,99 @@ return res.status(401).send("Unauthorized");
 const data = JSON.parse(body);
 
 if (data.financial_status !== "paid") {
-console.log("⛔ Non payé");
+console.log("⛔ Commande non payée");
 return res.status(200).send("Not paid");
 }
 
+/* =========================
+CLÉ ANTI-DOUBLON
+========================= */
 const uniqueKey = data.checkout_id || data.id;
 
-console.log("\n✅ Webhook PAYÉ");
-console.log("🔑 Clé:", uniqueKey);
+console.log("\n✅ Webhook PAYÉ reçu");
+console.log("🧾 Order ID:", data.id);
+console.log("🧩 Checkout ID:", data.checkout_id);
+console.log("🔑 Clé anti-doublon:", uniqueKey);
 
-/* =========================
-ANTI-DOUBLON SQLITE
-========================= */
 const exists = await db.get(
 "SELECT 1 FROM processed_orders WHERE unique_key = ?",
 uniqueKey
 );
 
 if (exists) {
-console.log("🛑 Déjà traité");
+console.log("🛑 Doublon détecté → ignoré");
 return res.status(200).send("Already processed");
 }
 
 /* =========================
-NUMÉRO (champ produit)
+DÉTECTION NUMÉRO (BLINDÉE)
 ========================= */
 let phone = null;
 
+// 1️⃣ line_items.properties
 for (const item of data.line_items || []) {
 for (const prop of item.properties || []) {
-const key = (prop.name || "").toLowerCase();
-if (key.includes("phone") || key.includes("numero")) {
-phone = prop.value?.trim();
+const key = (prop.name || "")
+.toLowerCase()
+.normalize("NFD")
+.replace(/[\u0300-\u036f]/g, "");
+
+if (
+key.includes("phone") ||
+key.includes("numero") ||
+key.includes("telephone")
+) {
+if (prop.value?.trim()) {
+phone = prop.value.trim();
 break;
+}
 }
 }
 if (phone) break;
 }
 
+// 2️⃣ note_attributes
+if (!phone && Array.isArray(data.note_attributes)) {
+for (const n of data.note_attributes) {
+const key = (n.name || "").toLowerCase();
+if (key.includes("phone") || key.includes("numero")) {
+phone = n.value?.trim();
+break;
+}
+}
+}
+
+// 3️⃣ shipping address
+if (!phone && data.shipping_address?.phone) {
+phone = data.shipping_address.phone.trim();
+}
+
+// 4️⃣ billing address
+if (!phone && data.billing_address?.phone) {
+phone = data.billing_address.phone.trim();
+}
+
+// 5️⃣ customer
+if (!phone && data.customer?.phone) {
+phone = data.customer.phone.trim();
+}
+
+/* =========================
+MONTANT
+========================= */
 const amount = Number(data.current_total_price);
 
-if (!phone || !amount) {
+console.log("📱 Numéro détecté FINAL:", phone);
+console.log("💰 Montant détecté:", amount);
+
+if (!phone || !amount || amount <= 0) {
 console.log("❌ Données manquantes");
 return res.status(200).send("Missing data");
 }
 
 const cleanPhone = phone.replace(/\D/g, "");
-if (!cleanPhone.startsWith("509")) {
-console.log("❌ Numéro invalide");
+if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
+console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
@@ -125,7 +170,7 @@ audience: RELOADLY_BASE_URL,
 const token = auth.data.access_token;
 
 /* =========================
-OPÉRATEUR AUTO-DETECT
+AUTO-DETECT OPÉRATEUR
 ========================= */
 const detect = await axios.get(
 `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}?countryCode=HT`,
@@ -138,6 +183,7 @@ Accept: "application/com.reloadly.topups-v1+json",
 );
 
 const operatorId = detect.data.operatorId;
+console.log("📡 Opérateur détecté:", detect.data.name);
 
 /* =========================
 RECHARGE
@@ -154,11 +200,13 @@ number: cleanPhone,
 },
 customIdentifier: uniqueKey,
 },
-{ headers: { Authorization: `Bearer ${token}` } }
+{
+headers: { Authorization: `Bearer ${token}` },
+}
 );
 
 /* =========================
-SAVE SQLITE (FINAL)
+SAUVEGARDE SQLITE
 ========================= */
 await db.run(
 "INSERT INTO processed_orders (unique_key, order_id) VALUES (?, ?)",
@@ -166,7 +214,7 @@ uniqueKey,
 data.id
 );
 
-console.log("🎉 Recharge OK + sauvegardée");
+console.log("🎉 RECHARGE RÉUSSIE + SAUVEGARDÉE");
 
 return res.status(200).send("OK");
 } catch (err) {
@@ -175,6 +223,13 @@ return res.status(200).send("Handled");
 }
 }
 );
+
+/* =========================
+HEALTH CHECK
+========================= */
+app.get("/", (req, res) => {
+res.send("Reloadly server running");
+});
 
 /* =========================
 START
