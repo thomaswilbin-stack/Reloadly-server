@@ -117,26 +117,12 @@ let topupAmount = null;
 let topupItem = null;
 
 for (const item of data.line_items || []) {
-const productType = (item.product_type || "")
+const title = (item.title || "")
 .toLowerCase()
-.normalize("NFD")
-.replace(/[\u0300-\u036f]/g, "")
 .trim();
 
-const tags = (item.tags || "")
-.toLowerCase()
-.normalize("NFD")
-.replace(/[\u0300-\u036f]/g, "")
-.replace(/\s+/g, " ")
-.trim();
-
-const isTopup =
-productType === "recharge international" ||
-productType === "recharge-international" ||
-tags.includes("recharge international") ||
-tags.includes("recharge-international");
-
-if (isTopup) {
+// 🔒 RÈGLE BÉTON : TITRE = RECHARGE
+if (title === "recharge" || title.includes("recharge")) {
 topupAmount = Number(item.price);
 topupItem = item;
 break;
@@ -147,8 +133,8 @@ console.log("💳 Produit TOP-UP:", topupItem?.title);
 console.log("💰 Montant TOP-UP détecté:", topupAmount);
 
 if (!topupAmount || topupAmount <= 0) {
-console.log("❌ Aucun produit Recharge International détecté");
-return res.status(200).send("No topup product");
+console.log("❌ Aucun produit RECHARGE détecté");
+return res.status(200).send("No recharge product");
 }
 
 /* =========================
@@ -231,3 +217,4 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
