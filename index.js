@@ -137,6 +137,18 @@ console.log("❌ Aucun produit RECHARGE détecté");
 return res.status(200).send("No recharge product");
 }
 
+  /* =========================
+FORMAT NUMÉRO (OBLIGATOIRE)
+========================= */
+const cleanPhone = phone.replace(/\D/g, "");
+
+console.log("📞 Numéro nettoyé:", cleanPhone);
+
+if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
+console.log("❌ Numéro invalide:", cleanPhone);
+return res.status(200).send("Invalid phone");
+}
+
 /* =========================
 AUTH RELOADLY
 ========================= */
@@ -217,4 +229,3 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
-
