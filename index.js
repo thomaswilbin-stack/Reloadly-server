@@ -164,22 +164,64 @@ audience: RELOADLY_BASE_URL,
 
 const token = auth.data.access_token;
 
+let operatorId;
+let operatorName = "UNKNOWN";
+
 /* =========================
-AUTO-DETECT OPÉRATEUR (ENDPOINT VALIDÉ)
+AUTO-DETECT AVEC FALLBACK
 ========================= */
-const detectUrl = `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`;
+try {
+console.log("🔎 Auto-detect:", `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`);
 
-console.log("🔎 Auto-detect:", detectUrl);
-
-const detect = await axios.get(detectUrl, {
+const detect = await axios.get(
+`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
+{
+timeout: 7000,
 headers: {
 Authorization: `Bearer ${token}`,
 Accept: "application/com.reloadly.topups-v1+json",
 },
-});
+}
+);
 
-const operatorId = detect.data.operatorId;
-console.log("📡 Opérateur:", detect.data.name);
+operatorId = detect.data.operatorId;
+operatorName = detect.data.name;
+console.log("📡 Opérateur détecté:", operatorName);
+
+} catch (err) {
+console.warn("⚠️ Auto-detect KO → fallback opérateur");
+
+/* ===== FALLBACK LISTE OPÉRATEURS ===== */
+const ops = await axios.get(
+`${RELOADLY_BASE_URL}/operators/countries/HT`,
+{
+headers: {
+Authorization: `Bearer ${token}`,
+Accept: "application/com.reloadly.topups-v1+json",
+},
+}
+);
+
+const operators = ops.data.content || [];
+
+const natcom = operators.find(o =>
+o.name.toLowerCase().includes("natcom")
+);
+const digicel = operators.find(o =>
+o.name.toLowerCase().includes("digicel")
+);
+
+const selected = natcom || digicel;
+
+if (!selected) {
+throw new Error("Aucun opérateur HT disponible");
+}
+
+operatorId = selected.id;
+operatorName = selected.name;
+
+console.log("🛟 Fallback opérateur utilisé:", operatorName);
+}
 
 /* =========================
 RECHARGE
@@ -229,3 +271,4 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
