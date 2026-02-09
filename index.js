@@ -17,10 +17,10 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const RELOADLY_BASE_URL = "https://topups.reloadly.com";
 
 /* =========================
-DATABASE SQLITE
+SQLITE (ANTI-DOUBLON PERSISTANT)
 ========================= */
 const db = await open({
-filename: "./orders.db",
+filename: "./recharges.db",
 driver: sqlite3.Database,
 });
 
@@ -28,10 +28,24 @@ await db.exec(`
 CREATE TABLE IF NOT EXISTS processed_orders (
 id INTEGER PRIMARY KEY AUTOINCREMENT,
 unique_key TEXT UNIQUE,
-order_id TEXT,
 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+)
 `);
+
+async function isProcessed(key) {
+const row = await db.get(
+"SELECT 1 FROM processed_orders WHERE unique_key = ?",
+key
+);
+return !!row;
+}
+
+async function saveProcessed(key) {
+await db.run(
+"INSERT OR IGNORE INTO processed_orders (unique_key) VALUES (?)",
+key
+);
+}
 
 /* =========================
 WEBHOOK SHOPIFY PAYÉ
@@ -57,14 +71,6 @@ return res.status(401).send("Unauthorized");
 
 const data = JSON.parse(body);
 
-if (data.financial_status !== "paid") {
-console.log("⛔ Commande non payée");
-return res.status(200).send("Not paid");
-}
-
-/* =========================
-CLÉ ANTI-DOUBLON
-========================= */
 const uniqueKey = data.checkout_id || data.id;
 
 console.log("\n✅ Webhook PAYÉ reçu");
@@ -72,22 +78,17 @@ console.log("🧾 Order ID:", data.id);
 console.log("🧩 Checkout ID:", data.checkout_id);
 console.log("🔑 Clé anti-doublon:", uniqueKey);
 
-const exists = await db.get(
-"SELECT 1 FROM processed_orders WHERE unique_key = ?",
-uniqueKey
-);
-
-if (exists) {
+/* ===== ANTI-DOUBLON BÉTON ===== */
+if (await isProcessed(uniqueKey)) {
 console.log("🛑 Doublon détecté → ignoré");
 return res.status(200).send("Already processed");
 }
 
 /* =========================
-DÉTECTION NUMÉRO (BLINDÉE)
+NUMÉRO (CHAMP PRODUIT)
 ========================= */
 let phone = null;
 
-// 1️⃣ line_items.properties
 for (const item of data.line_items || []) {
 for (const prop of item.properties || []) {
 const key = (prop.name || "")
@@ -96,11 +97,11 @@ const key = (prop.name || "")
 .replace(/[\u0300-\u036f]/g, "");
 
 if (
-key.includes("phone") ||
 key.includes("numero") ||
+key.includes("phone") ||
 key.includes("telephone")
 ) {
-if (prop.value?.trim()) {
+if (prop.value && prop.value.trim()) {
 phone = prop.value.trim();
 break;
 }
@@ -109,53 +110,47 @@ break;
 if (phone) break;
 }
 
-// 2️⃣ note_attributes
-if (!phone && Array.isArray(data.note_attributes)) {
-for (const n of data.note_attributes) {
-const key = (n.name || "").toLowerCase();
-if (key.includes("phone") || key.includes("numero")) {
-phone = n.value?.trim();
+/* =========================
+PRODUIT RECHARGE UNIQUEMENT
+========================= */
+let topupAmount = null;
+
+for (const item of data.line_items || []) {
+const tags = (item.tags || "")
+.toLowerCase()
+.normalize("NFD")
+.replace(/[\u0300-\u036f]/g, "")
+.replace(/\s+/g, " ")
+.trim();
+
+const isTopup =
+tags.includes("recharge-international") ||
+tags.includes("recharge international");
+
+if (isTopup) {
+topupAmount = Number(item.price);
 break;
 }
 }
-}
 
-// 3️⃣ shipping address
-if (!phone && data.shipping_address?.phone) {
-phone = data.shipping_address.phone.trim();
-}
+console.log("📱 Numéro détecté:", phone);
+console.log("💰 Montant TOP-UP détecté:", topupAmount);
 
-// 4️⃣ billing address
-if (!phone && data.billing_address?.phone) {
-phone = data.billing_address.phone.trim();
-}
-
-// 5️⃣ customer
-if (!phone && data.customer?.phone) {
-phone = data.customer.phone.trim();
-}
-
-/* =========================
-MONTANT
-========================= */
-const amount = Number(data.current_total_price);
-
-console.log("📱 Numéro détecté FINAL:", phone);
-console.log("💰 Montant détecté:", amount);
-
-if (!phone || !amount || amount <= 0) {
-console.log("❌ Données manquantes");
+if (!phone || !topupAmount || topupAmount <= 0) {
+console.log("❌ Données manquantes ou panier sans recharge");
 return res.status(200).send("Missing data");
 }
 
+/* ===== Nettoyage numéro ===== */
 const cleanPhone = phone.replace(/\D/g, "");
+
 if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
 console.log("❌ Numéro invalide:", cleanPhone);
 return res.status(200).send("Invalid phone");
 }
 
 /* =========================
-TOKEN RELOADLY
+AUTH RELOADLY
 ========================= */
 const auth = await axios.post(
 "https://auth.reloadly.com/oauth/token",
@@ -170,29 +165,30 @@ audience: RELOADLY_BASE_URL,
 const token = auth.data.access_token;
 
 /* =========================
-AUTO-DETECT OPÉRATEUR
+AUTO-DETECT OPÉRATEUR (ENDPOINT VALIDÉ)
 ========================= */
-const detect = await axios.get(
-`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
-{
+const detectUrl = `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`;
+
+console.log("🔎 Auto-detect:", detectUrl);
+
+const detect = await axios.get(detectUrl, {
 headers: {
 Authorization: `Bearer ${token}`,
 Accept: "application/com.reloadly.topups-v1+json",
 },
-}
-);
+});
 
 const operatorId = detect.data.operatorId;
-console.log("📡 Opérateur détecté:", detect.data.name);
+console.log("📡 Opérateur:", detect.data.name);
 
 /* =========================
 RECHARGE
 ========================= */
-await axios.post(
+const topup = await axios.post(
 `${RELOADLY_BASE_URL}/topups`,
 {
 operatorId,
-amount,
+amount: topupAmount,
 useLocalAmount: false,
 recipientPhone: {
 countryCode: "HT",
@@ -205,20 +201,16 @@ headers: { Authorization: `Bearer ${token}` },
 }
 );
 
-/* =========================
-SAUVEGARDE SQLITE
-========================= */
-await db.run(
-"INSERT INTO processed_orders (unique_key, order_id) VALUES (?, ?)",
-uniqueKey,
-data.id
-);
+console.log("🎉 RECHARGE RÉUSSIE");
+console.log("🆔 Transaction:", topup.data.transactionId);
 
-console.log("🎉 RECHARGE RÉUSSIE + SAUVEGARDÉE");
+/* ===== SAUVEGARDE SQLITE ===== */
+await saveProcessed(uniqueKey);
+console.log("💾 Recharge sauvegardée (SQLite)");
 
 return res.status(200).send("OK");
 } catch (err) {
-console.error("❌ Erreur:", err.response?.data || err.message);
+console.error("❌ Erreur recharge:", err.response?.data || err.message);
 return res.status(200).send("Handled");
 }
 }
@@ -237,5 +229,3 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
-
-
