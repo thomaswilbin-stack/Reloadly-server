@@ -114,8 +114,15 @@ if (phone) break;
 PRODUIT RECHARGE UNIQUEMENT
 ========================= */
 let topupAmount = null;
+let topupItem = null;
 
 for (const item of data.line_items || []) {
+const productType = (item.product_type || "")
+.toLowerCase()
+.normalize("NFD")
+.replace(/[\u0300-\u036f]/g, "")
+.trim();
+
 const tags = (item.tags || "")
 .toLowerCase()
 .normalize("NFD")
@@ -124,29 +131,24 @@ const tags = (item.tags || "")
 .trim();
 
 const isTopup =
-tags.includes("recharge-international") ||
-tags.includes("recharge international");
+productType === "recharge international" ||
+productType === "recharge-international" ||
+tags.includes("recharge international") ||
+tags.includes("recharge-international");
 
 if (isTopup) {
 topupAmount = Number(item.price);
+topupItem = item;
 break;
 }
 }
 
-console.log("📱 Numéro détecté:", phone);
+console.log("💳 Produit TOP-UP:", topupItem?.title);
 console.log("💰 Montant TOP-UP détecté:", topupAmount);
 
-if (!phone || !topupAmount || topupAmount <= 0) {
-console.log("❌ Données manquantes ou panier sans recharge");
-return res.status(200).send("Missing data");
-}
-
-/* ===== Nettoyage numéro ===== */
-const cleanPhone = phone.replace(/\D/g, "");
-
-if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
-console.log("❌ Numéro invalide:", cleanPhone);
-return res.status(200).send("Invalid phone");
+if (!topupAmount || topupAmount <= 0) {
+console.log("❌ Aucun produit Recharge International détecté");
+return res.status(200).send("No topup product");
 }
 
 /* =========================
