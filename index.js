@@ -20,7 +20,7 @@ const RELOADLY_BASE_URL = "https://topups.reloadly.com";
 SQLITE (ANTI-DOUBLON PERSISTANT)
 ========================= */
 const db = await open({
-filename: "./recharges.db",
+filename: "./recharges.db", // ⚠️ sur Render → /data/recharges.db
 driver: sqlite3.Database,
 });
 
@@ -28,21 +28,38 @@ await db.exec(`
 CREATE TABLE IF NOT EXISTS processed_orders (
 id INTEGER PRIMARY KEY AUTOINCREMENT,
 unique_key TEXT UNIQUE,
+phone TEXT,
+status TEXT DEFAULT 'LOCKED',
 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 `);
 
 async function isProcessed(key) {
 const row = await db.get(
-"SELECT 1 FROM processed_orders WHERE unique_key = ?",
+"SELECT status FROM processed_orders WHERE unique_key = ?",
 key
 );
-return !!row;
+return row && (row.status === "LOCKED" || row.status === "SUCCESS");
 }
 
-async function saveProcessed(key) {
+async function lockOrder(key, phone) {
 await db.run(
-"INSERT OR IGNORE INTO processed_orders (unique_key) VALUES (?)",
+"INSERT OR IGNORE INTO processed_orders (unique_key, phone, status) VALUES (?, ?, 'LOCKED')",
+key,
+phone
+);
+}
+
+async function markSuccess(key) {
+await db.run(
+"UPDATE processed_orders SET status = 'SUCCESS' WHERE unique_key = ?",
+key
+);
+}
+
+async function markFailed(key) {
+await db.run(
+"UPDATE processed_orders SET status = 'FAILED' WHERE unique_key = ?",
 key
 );
 }
@@ -54,6 +71,8 @@ app.post(
 "/webhook",
 express.raw({ type: "application/json" }),
 async (req, res) => {
+let uniqueKey = null;
+
 try {
 /* ===== Vérification HMAC ===== */
 const hmac = req.headers["x-shopify-hmac-sha256"];
@@ -71,21 +90,21 @@ return res.status(401).send("Unauthorized");
 
 const data = JSON.parse(body);
 
-const uniqueKey = data.checkout_id || data.id;
+uniqueKey = data.checkout_id || data.id;
 
 console.log("\n✅ Webhook PAYÉ reçu");
 console.log("🧾 Order ID:", data.id);
 console.log("🧩 Checkout ID:", data.checkout_id);
 console.log("🔑 Clé anti-doublon:", uniqueKey);
 
-/* ===== ANTI-DOUBLON BÉTON ===== */
+/* ===== ANTI-DOUBLON ===== */
 if (await isProcessed(uniqueKey)) {
 console.log("🛑 Doublon détecté → ignoré");
 return res.status(200).send("Already processed");
 }
 
 /* =========================
-NUMÉRO (CHAMP PRODUIT)
+NUMÉRO
 ========================= */
 let phone = null;
 
@@ -110,6 +129,32 @@ break;
 if (phone) break;
 }
 
+const cleanPhone = phone?.replace(/\D/g, "");
+console.log("📞 Numéro nettoyé:", cleanPhone);
+
+if (!cleanPhone || !cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
+console.log("❌ Numéro invalide");
+return res.status(200).send("Invalid phone");
+}
+
+/* =========================
+LIMITE / JOUR / NUMÉRO
+========================= */
+const todayCount = await db.get(
+`
+SELECT COUNT(*) as count
+FROM processed_orders
+WHERE phone = ?
+AND DATE(created_at) = DATE('now')
+`,
+cleanPhone
+);
+
+if (todayCount.count >= 2) {
+console.log("🚫 Limite journalière atteinte");
+return res.status(200).send("Limit reached");
+}
+
 /* =========================
 PRODUIT RECHARGE UNIQUEMENT
 ========================= */
@@ -117,11 +162,7 @@ let topupAmount = null;
 let topupItem = null;
 
 for (const item of data.line_items || []) {
-const title = (item.title || "")
-.toLowerCase()
-.trim();
-
-// 🔒 RÈGLE BÉTON : TITRE = RECHARGE
+const title = (item.title || "").toLowerCase().trim();
 if (title === "recharge" || title.includes("recharge")) {
 topupAmount = Number(item.price);
 topupItem = item;
@@ -137,17 +178,11 @@ console.log("❌ Aucun produit RECHARGE détecté");
 return res.status(200).send("No recharge product");
 }
 
-  /* =========================
-FORMAT NUMÉRO (OBLIGATOIRE)
+/* =========================
+🔒 LOCK AVANT ARGENT
 ========================= */
-const cleanPhone = phone.replace(/\D/g, "");
-
-console.log("📞 Numéro nettoyé:", cleanPhone);
-
-if (!cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
-console.log("❌ Numéro invalide:", cleanPhone);
-return res.status(200).send("Invalid phone");
-}
+await lockOrder(uniqueKey, cleanPhone);
+console.log("🧱 Clé verrouillée AVANT recharge");
 
 /* =========================
 AUTH RELOADLY
@@ -159,20 +194,15 @@ client_id: RELOADLY_CLIENT_ID,
 client_secret: RELOADLY_CLIENT_SECRET,
 grant_type: "client_credentials",
 audience: RELOADLY_BASE_URL,
-}
+},
+{ timeout: 7000 }
 );
 
 const token = auth.data.access_token;
 
-let operatorId;
-let operatorName = "UNKNOWN";
-
 /* =========================
-AUTO-DETECT AVEC FALLBACK
+AUTO-DETECT
 ========================= */
-try {
-console.log("🔎 Auto-detect:", `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`);
-
 const detect = await axios.get(
 `${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
 {
@@ -184,50 +214,10 @@ Accept: "application/com.reloadly.topups-v1+json",
 }
 );
 
-operatorId = detect.data.operatorId;
-operatorName = detect.data.name;
+const operatorId = detect.data.operatorId;
+const operatorName = detect.data.name;
+
 console.log("📡 Opérateur détecté:", operatorName);
-
-} catch (err) {
-console.warn("⚠️ Auto-detect KO → fallback opérateur");
-
-/* ===== FALLBACK LISTE OPÉRATEURS ===== */
-const ops = await axios.get(
-`${RELOADLY_BASE_URL}/operators/countries/HT`,
-{
-headers: {
-Authorization: `Bearer ${token}`,
-Accept: "application/com.reloadly.topups-v1+json",
-},
-}
-);
-
-const operators = ops.data.content || [];
-
-const natcom = operators.find(o =>
-o.name.toLowerCase().includes("natcom")
-);
-const digicel = operators.find(o =>
-o.name.toLowerCase().includes("digicel")
-);
-
-const selected = natcom || digicel;
-
-if (!selected) {
-throw new Error("Aucun opérateur HT disponible");
-}
-
-operatorId = selected.id;
-operatorName = selected.name;
-
-console.log("🛟 Fallback opérateur utilisé:", operatorName);
-}
-
-  /* =========================
-🔒 BLOCAGE AVANT RECHARGE
-========================= */
-await saveprocessed(uniqueKey);
-console.log("🧱 Clé verrouillée AVANT recharge");
 
 /* =========================
 RECHARGE
@@ -245,19 +235,23 @@ number: cleanPhone,
 customIdentifier: uniqueKey,
 },
 {
-headers: { Authorization: `Bearer ${token}` },
+timeout: 10000,
+headers: {
+Authorization: `Bearer ${token}`,
+Accept: "application/com.reloadly.topups-v1+json",
+},
 }
 );
 
 console.log("🎉 RECHARGE RÉUSSIE");
 console.log("🆔 Transaction:", topup.data.transactionId);
 
-/* ===== SAUVEGARDE SQLITE ===== */
-console.log("💾 Recharge sauvegardée (SQLite)");
+await markSuccess(uniqueKey);
 
 return res.status(200).send("OK");
 } catch (err) {
 console.error("❌ Erreur recharge:", err.response?.data || err.message);
+if (uniqueKey) await markFailed(uniqueKey);
 return res.status(200).send("Handled");
 }
 }
@@ -276,10 +270,3 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
-
-
-
-
-
-
-
