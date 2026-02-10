@@ -5,16 +5,20 @@ import crypto from "crypto";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 
+console.log("🔥 FICHIER index.js CHARGÉ");
+
 const app = express();
 
-// ======================
-// CONFIG
-// ======================
+/* ======================
+CONFIG
+====================== */
 const PORT = process.env.PORT || 3000;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const RELOADLY_TOKEN = process.env.RELOADLY_TOKEN;
 
-// IMPORTANT: body raw pour HMAC
+/* ======================
+RAW BODY POUR HMAC
+====================== */
 app.use(
 bodyParser.json({
 verify: (req, res, buf) => {
@@ -23,9 +27,9 @@ req.rawBody = buf;
 })
 );
 
-// ======================
-// SQLITE (ANTI-DOUBLON PERSISTANT)
-// ======================
+/* ======================
+SQLITE (ANTI-DOUBLON)
+====================== */
 const db = await open({
 filename: "./topup.db",
 driver: sqlite3.Database,
@@ -44,7 +48,7 @@ const row = await db.get(
 "SELECT status FROM processed WHERE unique_key = ?",
 key
 );
-return !!row; // bloque si PROCESSING ou DONE
+return !!row;
 }
 
 async function lockBeforeSend(key) {
@@ -62,9 +66,9 @@ key
 );
 }
 
-// ======================
-// UTILS
-// ======================
+/* ======================
+UTILS
+====================== */
 function cleanPhone(phone) {
 return phone.replace(/\D/g, "");
 }
@@ -84,19 +88,28 @@ Buffer.from(hmacHeader)
 );
 }
 
-// ======================
-// HEALTH CHECK
-// ======================
+/* ======================
+HEALTH CHECK
+====================== */
 app.get("/", (req, res) => {
+console.log("🟢 GET / touché");
 res.send("✅ Wimas Webhook actif");
 });
 
-// ======================
-// WEBHOOK SHOPIFY — ORDER PAID
-// ======================
+/* ======================
+DEBUG — CONFIRME QUE SHOPIFY TOUCHE LA ROUTE
+====================== */
+app.post("/webhook/paid", (req, res, next) => {
+console.log("🔥 WEBHOOK /webhook/paid TOUCHÉ");
+next();
+});
+
+/* ======================
+WEBHOOK SHOPIFY — ORDER PAID
+====================== */
 app.post("/webhook/paid", async (req, res) => {
 try {
-// 🔐 Vérification HMAC
+/* ===== HMAC ===== */
 if (!verifyShopifyHmac(req)) {
 console.log("⛔ HMAC invalide");
 return res.sendStatus(401);
@@ -104,19 +117,19 @@ return res.sendStatus(401);
 
 const data = req.body;
 
-console.log("\n✅ Webhook PAYÉ reçu");
+console.log("✅ Webhook PAYÉ reçu");
 console.log("🧾 Order ID:", data.id);
 
-// ======================
-// 1️⃣ PRODUIT RECHARGE UNIQUEMENT (TAG = RECHARGE)
-// ======================
+/* ======================
+PRODUIT RECHARGE UNIQUEMENT (TAG = RECHARGE)
+====================== */
 let rechargeItem = null;
 
 for (const item of data.line_items || []) {
 const tags = (item.tags || "")
 .toLowerCase()
 .split(",")
-.map((t) => t.trim());
+.map(t => t.trim());
 
 if (tags.includes("recharge")) {
 rechargeItem = item;
@@ -131,104 +144,104 @@ return res.sendStatus(200);
 
 console.log("💳 Produit RECHARGE:", rechargeItem.title);
 
-// ======================
-// 2️⃣ MONTANT RECHARGE (SEUL)
-// ======================
-const topupAmount =
-parseFloat(rechargeItem.price) * rechargeItem.quantity;
+/* ======================
+MONTANT
+====================== */
+const amount = Number(rechargeItem.price) * rechargeItem.quantity;
+console.log("💰 Montant:", amount);
 
-if (!topupAmount || topupAmount <= 0) {
-console.log("⛔ Montant invalide → STOP");
+if (!amount || amount <= 0) {
+console.log("⛔ Montant invalide");
 return res.sendStatus(200);
 }
 
-console.log("💰 Montant:", topupAmount);
-
-// ======================
-// 3️⃣ NUMÉRO TÉLÉPHONE
-// ======================
+/* ======================
+NUMÉRO
+====================== */
 const rawPhone =
-data.note_attributes?.find((n) => n.name === "phone")?.value ||
+data.note_attributes?.find(n => n.name === "phone")?.value ||
 data.phone;
 
 if (!rawPhone) {
-console.log("⛔ Numéro absent → STOP");
+console.log("⛔ Numéro absent");
 return res.sendStatus(200);
 }
 
 const phone = cleanPhone(rawPhone);
 console.log("📞 Téléphone:", phone);
 
-// ======================
-// 4️⃣ CLÉ ANTI-DOUBLON FORTE
-// ======================
-const uniqueKey = `${data.id}-${phone}-${topupAmount}`;
+/* ======================
+CLÉ ANTI-DOUBLON
+====================== */
+const uniqueKey = `${data.id}-${phone}-${amount}`;
 console.log("🔑 Clé:", uniqueKey);
 
 if (await alreadyProcessed(uniqueKey)) {
-console.log("⛔ Déjà traité → STOP");
+console.log("🛑 Déjà traité → STOP");
 return res.sendStatus(200);
 }
 
-// 🔒 LOCK AVANT ARGENT
 await lockBeforeSend(uniqueKey);
-console.log("🧱 Clé verrouillée");
+console.log("🧱 Clé verrouillée AVANT recharge");
 
-// ======================
-// 5️⃣ AUTO-DETECT OPÉRATEUR (HT)
-// ======================
-const detectUrl = `https://topups.reloadly.com/operators/auto-detect/phone/${phone}/countries/HT`;
-
-const detect = await axios.get(detectUrl, {
+/* ======================
+AUTO-DETECT OPÉRATEUR (HT)
+====================== */
+const detect = await axios.get(
+`https://topups.reloadly.com/operators/auto-detect/phone/${phone}/countries/HT`,
+{
 headers: {
 Authorization: `Bearer ${RELOADLY_TOKEN}`,
 Accept: "application/com.reloadly.topups-v1+json",
 },
-});
+}
+);
 
 const operatorId = detect.data?.operatorId;
+console.log("📡 Operator ID:", operatorId);
+
 if (!operatorId) {
-console.log("⛔ Opérateur introuvable → STOP");
+console.log("⛔ Opérateur introuvable");
 return res.sendStatus(200);
 }
 
-console.log("📡 Operator ID:", operatorId);
-
-// ======================
-// 6️⃣ ENVOI RECHARGE
-// ======================
+/* ======================
+ENVOI RECHARGE
+====================== */
 await axios.post(
 "https://topups.reloadly.com/topups",
 {
 operatorId,
-amount: topupAmount,
+amount,
 useLocalAmount: false,
 recipientPhone: {
 countryCode: "HT",
 number: phone,
 },
+customIdentifier: uniqueKey,
 },
 {
 headers: {
 Authorization: `Bearer ${RELOADLY_TOKEN}`,
 Accept: "application/com.reloadly.topups-v1+json",
-"Content-Type": "application/json",
 },
 }
 );
 
 await markDone(uniqueKey);
-console.log("🎉 Recharge envoyée avec succès");
+console.log("🎉 RECHARGE RÉUSSIE");
 
 return res.sendStatus(200);
+
 } catch (err) {
-console.error("❌ Erreur:", err.response?.data || err.message);
-// On répond 200 pour éviter retry Shopify
+console.error("❌ ERREUR:", err.response?.data || err.message);
 return res.sendStatus(200);
 }
 });
 
-// ======================
+/* ======================
+START SERVER
+====================== */
 app.listen(PORT, () => {
 console.log(`🚀 Wimas Webhook en ligne sur le port ${PORT}`);
 });
