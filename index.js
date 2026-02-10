@@ -226,7 +226,7 @@ console.log("🛟 Fallback opérateur utilisé:", operatorName);
   /* =========================
 🔒 BLOCAGE AVANT RECHARGE
 ========================= */
-await lockKey(uniqueKey);
+await saveprocessed(uniqueKey);
 console.log("🧱 Clé verrouillée AVANT recharge");
 
 /* =========================
@@ -276,6 +276,7 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
 
 
 
