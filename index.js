@@ -79,9 +79,8 @@ console.log("🧩 Checkout ID:", data.checkout_id);
 console.log("🔑 Clé anti-doublon:", uniqueKey);
 
 /* ===== ANTI-DOUBLON BÉTON ===== */
-const uniqueKey = `${data.id}-${cleanPhone}-${amount}`;
 if (await isProcessed(uniqueKey)) {
-console.log("🛑 Recharge déjà effectuée → STOP");
+console.log("🛑 Doublon détecté → ignoré");
 return res.status(200).send("Already processed");
 }
 
@@ -277,6 +276,7 @@ START
 app.listen(PORT, () => {
 console.log(`🚀 Serveur actif sur port ${PORT}`);
 });
+
 
 
 
