@@ -5,41 +5,42 @@ const { Pool } = require("pg");
 
 const app = express();
 
-// =====================
-// IMPORTANT POUR HMAC SHOPIFY
-// =====================
+// =======================
+// IMPORTANT POUR SHOPIFY
+// =======================
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
-// =====================
-// ROUTE TEST (évite Cannot GET)
-// =====================
+// =======================
+// ROUTES TEST
+// =======================
 app.get("/", (req, res) => {
 res.status(200).send("Wimas Reloadly Server en ligne 🚀");
 });
 
-app.get("/health", (req, res) => {
-res.status(200).json({ status: "OK" });
+// Pour éviter "Cannot GET /webhook"
+app.get("/webhook", (req, res) => {
+res.status(200).send("Webhook endpoint actif");
 });
 
-// =====================
+// =======================
 // ENV VARIABLES
-// =====================
+// =======================
 const SHOPIFY_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
 
-// =====================
+// =======================
 // POSTGRESQL
-// =====================
+// =======================
 const pool = new Pool({
 connectionString: DATABASE_URL,
 ssl: { rejectUnauthorized: false }
 });
 
-// Création table
 (async () => {
+try {
 await pool.query(`
 CREATE TABLE IF NOT EXISTS recharges (
 id SERIAL PRIMARY KEY,
@@ -51,48 +52,40 @@ created_at TIMESTAMP DEFAULT NOW()
 );
 `);
 console.log("PostgreSQL prêt");
+} catch (err) {
+console.log("Erreur DB:", err.message);
+}
 })();
 
-// =====================
+// =======================
 // VERIFY HMAC
-// =====================
+// =======================
 function verifyShopifyWebhook(req) {
+try {
 const hmac = req.get("X-Shopify-Hmac-Sha256");
+
 const digest = crypto
 .createHmac("sha256", SHOPIFY_SECRET)
 .update(req.body, "utf8")
 .digest("base64");
 
-if (!hmac) return false;
-
 return crypto.timingSafeEqual(
 Buffer.from(hmac),
 Buffer.from(digest)
 );
+} catch {
+return false;
+}
 }
 
-// =====================
-// GET RELOADLY TOKEN
-// =====================
-async function getReloadlyToken() {
-const response = await axios.post(
-"https://auth.reloadly.com/oauth/token",
-{
-client_id: RELOADLY_CLIENT_ID,
-client_secret: RELOADLY_CLIENT_SECRET,
-grant_type: "client_credentials",
-audience: "https://topups.reloadly.com"
-}
-);
-return response.data.access_token;
-}
-
-// =====================
-// WEBHOOK
-// =====================
+// =======================
+// WEBHOOK POST
+// =======================
 app.post("/webhook", async (req, res) => {
+console.log("Webhook reçu");
 
 if (!verifyShopifyWebhook(req)) {
+console.log("HMAC invalide");
 return res.status(401).send("HMAC invalide");
 }
 
@@ -102,121 +95,16 @@ if (order.financial_status !== "paid") {
 return res.status(200).send("Non payé");
 }
 
-// 🔍 Identifier produit RECHARGE
-const rechargeItem = order.line_items.find(item =>
-item.title.toLowerCase().includes("recharge")
-);
+console.log("Commande payée détectée");
 
-if (!rechargeItem) {
-return res.status(200).send("Pas recharge");
-}
-
-const checkoutId = order.checkout_id;
-const amount = parseFloat(rechargeItem.price);
-const phone = (order.note || "").replace(/\D/g, "");
-
-if (!checkoutId || !phone || !amount) {
-return res.status(400).send("Données invalides");
-}
-
-const client = await pool.connect();
-
-try {
-await client.query("BEGIN");
-
-const existing = await client.query(
-"SELECT status FROM recharges WHERE checkout_id = $1 FOR UPDATE",
-[checkoutId]
-);
-
-if (existing.rows.length > 0) {
-await client.query("ROLLBACK");
-return res.status(200).send("Déjà traité");
-}
-
-const recent = await client.query(
-`SELECT id FROM recharges
-WHERE phone = $1
-AND created_at > NOW() - INTERVAL '5 minutes'`,
-[phone]
-);
-
-if (recent.rows.length > 0) {
-await client.query("ROLLBACK");
-return res.status(200).send("Bloqué 5 minutes");
-}
-
-const idempotencyKey = crypto
-.createHash("sha256")
-.update(checkoutId + phone + amount)
-.digest("hex");
-
-await client.query(
-`INSERT INTO recharges (checkout_id, phone, amount, status)
-VALUES ($1, $2, $3, $4)`,
-[checkoutId, phone, amount, "processing"]
-);
-
-await client.query("COMMIT");
-
-// =====================
-// RELOADLY
-// =====================
-const token = await getReloadlyToken();
-
-const operator = await axios.get(
-`https://topups.reloadly.com/operators/auto-detect/phone/${phone}/countries/HT`,
-{
-headers: { Authorization: `Bearer ${token}` },
-timeout: 15000
-}
-);
-
-const operatorId = operator.data.operatorId;
-
-await axios.post(
-"https://topups.reloadly.com/topups",
-{
-operatorId,
-amount,
-useLocalAmount: false,
-customIdentifier: idempotencyKey,
-recipientPhone: {
-countryCode: "HT",
-number: phone
-}
-},
-{
-headers: { Authorization: `Bearer ${token}` },
-timeout: 20000
-}
-);
-
-await pool.query(
-"UPDATE recharges SET status = $1 WHERE checkout_id = $2",
-["success", checkoutId]
-);
-
-return res.status(200).send("Recharge OK");
-
-} catch (error) {
-
-await client.query("ROLLBACK");
-
-await pool.query(
-"UPDATE recharges SET status = $1 WHERE checkout_id = $2",
-["failed", checkoutId]
-);
-
-console.log("Erreur recharge:", error.message);
-
-return res.status(200).send("Erreur gérée");
-} finally {
-client.release();
-}
+return res.status(200).send("Webhook traité");
 });
 
-// =====================
-app.listen(3000, () => {
-console.log("Serveur PostgreSQL Wimas démarré");
+// =======================
+// PORT RENDER
+// =======================
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+console.log("Wimas server running on port " + PORT);
 });
