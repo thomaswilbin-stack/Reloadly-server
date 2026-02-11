@@ -130,38 +130,29 @@ const checkoutId = order.checkout_id || order.id;
 
 let phone = null;
 
-if (order.note_attributes && order.note_attributes.length > 0) {
-const phoneField = order.note_attributes.find(attr =>
-attr.name.toLowerCase().includes("phone")
+// Cherche dans les propriétés du produit
+if (rechargeItem.properties && rechargeItem.properties.length > 0) {
+const phoneProperty = rechargeItem.properties.find(prop =>
+prop.name.toLowerCase().includes("phone")
 );
-if (phoneField) phone = phoneField.value;
+
+if (phoneProperty) {
+phone = phoneProperty.value;
+}
 }
 
 if (!phone) {
-console.log("Téléphone non trouvé dans note_attributes");
+console.log("Téléphone non trouvé dans line item properties");
 return res.status(400).send("Téléphone manquant");
 }
 
-// Nettoyage numéro (enlève espaces, +, -, etc.)
+// Nettoyage du numéro
 phone = phone.replace(/\D/g, "");
 
 if (phone.length < 8) {
 console.log("Numéro invalide:", phone);
 return res.status(400).send("Numéro invalide");
 }
-
-const amount = parseFloat(rechargeItem.price);
-
-if (!amount || amount <= 0) {
-console.log("Montant invalide");
-return res.status(400).send("Montant invalide");
-}
-
-const countryCode = "HT"; // ⚠️ adapte si multi pays
-
-console.log("Checkout:", checkoutId);
-console.log("Phone:", phone);
-console.log("Amount:", amount);
 
 /* ================= ANTI DOUBLE RECHARGE ================= */
 
@@ -256,3 +247,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
 console.log("Wimas server running on port " + PORT);
 });
+
