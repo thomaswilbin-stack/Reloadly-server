@@ -39,6 +39,12 @@ operator_id INTEGER,
 created_at TIMESTAMP DEFAULT NOW()
 );
 `);
+
+await pool.query(`
+ALTER TABLE recharges
+ADD COLUMN IF NOT EXISTS operator_id INTEGER;
+`);
+
 console.log("PostgreSQL prêt");
 })();
 
@@ -50,7 +56,7 @@ const hmac = req.get("X-Shopify-Hmac-Sha256");
 
 const digest = crypto
 .createHmac("sha256", SHOPIFY_SECRET)
-.update(req.body, "utf8")
+.update(req.body)
 .digest("base64");
 
 return crypto.timingSafeEqual(
@@ -77,7 +83,7 @@ audience: "https://topups.reloadly.com"
 return response.data.access_token;
 }
 
-/* ================= AUTO DETECT ================= */
+/* ================= OPERATOR DETECT ================= */
 
 async function detectOperator(phone, countryCode, token) {
 const response = await axios.get(
@@ -94,12 +100,11 @@ throw new Error("Opérateur non détecté");
 return response.data.operatorId;
 }
 
-/* ================= TELEPHONE FINDER ================= */
+/* ================= PHONE EXTRACT ================= */
 
 function extractPhone(order, rechargeItem) {
 let phone = null;
 
-// 1️⃣ line item properties
 if (rechargeItem.properties?.length > 0) {
 const prop = rechargeItem.properties.find(p =>
 p.value && p.value.match(/\d{6,}/)
@@ -107,7 +112,6 @@ p.value && p.value.match(/\d{6,}/)
 if (prop) phone = prop.value;
 }
 
-// 2️⃣ note_attributes
 if (!phone && order.note_attributes?.length > 0) {
 const attr = order.note_attributes.find(a =>
 a.value && a.value.match(/\d{6,}/)
@@ -115,35 +119,22 @@ a.value && a.value.match(/\d{6,}/)
 if (attr) phone = attr.value;
 }
 
-// 3️⃣ order.note
-if (!phone && order.note && order.note.match(/\d{6,}/)) {
-phone = order.note;
-}
-
-// 4️⃣ shipping
 if (!phone && order.shipping_address?.phone) {
 phone = order.shipping_address.phone;
 }
 
-// 5️⃣ customer
 if (!phone && order.customer?.phone) {
 phone = order.customer.phone;
 }
 
-if (phone) {
-phone = phone.replace(/\D/g, "");
-}
-
-return phone;
+return phone ? phone.replace(/\D/g, "") : null;
 }
 
 /* ================= WEBHOOK ================= */
 
 app.post("/webhook", async (req, res) => {
-console.log("Webhook reçu");
 
 if (!verifyShopifyWebhook(req)) {
-console.log("HMAC invalide");
 return res.status(401).send("HMAC invalide");
 }
 
@@ -154,7 +145,7 @@ return res.status(200).send("Non payé");
 }
 
 const rechargeItem = order.line_items.find(item =>
-item.title && item.title.toUpperCase().includes("RECHARGE")
+item.title?.toUpperCase().includes("RECHARGE")
 );
 
 if (!rechargeItem) {
@@ -164,52 +155,39 @@ return res.status(200).send("Pas recharge");
 const checkoutId = order.checkout_id || order.id;
 const amount = parseFloat(rechargeItem.price);
 const phone = extractPhone(order, rechargeItem);
+const countryCode = "HT";
 
-if (!checkoutId || !amount || !phone || phone.length < 8) {
-console.log("Données invalides");
+if (!checkoutId || !amount || !phone) {
 return res.status(400).send("Données invalides");
 }
 
-const countryCode = "HT";
+/* 🚀 Répond immédiatement à Shopify */
+res.status(200).send("OK");
 
-console.log("Checkout:", checkoutId);
-console.log("Phone:", phone);
-console.log("Amount:", amount);
+try {
 
 /* ================= ANTI DOUBLE ================= */
 
-const client = await pool.connect();
-
-try {
-await client.query("BEGIN");
-
-const insert = await client.query(
-`INSERT INTO recharges (checkout_id, phone, amount, status)
-VALUES ($1,$2,$3,'processing')
-ON CONFLICT (checkout_id) DO NOTHING
-RETURNING *`,
-[checkoutId, phone, amount]
+const existing = await pool.query(
+`SELECT status FROM recharges WHERE checkout_id=$1`,
+[checkoutId]
 );
 
-if (insert.rowCount === 0) {
-console.log("Recharge déjà traitée");
-await client.query("ROLLBACK");
-return res.status(200).send("Déjà traité");
+if (existing.rows.length > 0) {
+if (existing.rows[0].status === "success") {
+console.log("Déjà traité");
+return;
 }
-
-await client.query("COMMIT");
-
-} catch (err) {
-await client.query("ROLLBACK");
-console.log("Erreur DB:", err.message);
-return res.status(500).send("Erreur DB");
-} finally {
-client.release();
+} else {
+await pool.query(
+`INSERT INTO recharges (checkout_id, phone, amount, status)
+VALUES ($1,$2,$3,'processing')`,
+[checkoutId, phone, amount]
+);
 }
 
 /* ================= RELOADLY ================= */
 
-try {
 const token = await getReloadlyToken();
 const operatorId = await detectOperator(phone, countryCode, token);
 
@@ -218,7 +196,7 @@ await pool.query(
 [operatorId, checkoutId]
 );
 
-const response = await axios.post(
+await axios.post(
 "https://topups.reloadly.com/topups",
 {
 operatorId,
@@ -244,7 +222,7 @@ WHERE checkout_id=$1`,
 [checkoutId]
 );
 
-console.log("Recharge SUCCESS:", response.data);
+console.log("Recharge SUCCESS:", checkoutId);
 
 } catch (err) {
 
@@ -257,7 +235,6 @@ WHERE checkout_id=$1`,
 console.log("Erreur recharge:", err.response?.data || err.message);
 }
 
-return res.status(200).send("OK");
 });
 
 /* ================= PORT ================= */
@@ -265,5 +242,6 @@ return res.status(200).send("OK");
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-console.log("Wimas server running on port " + PORT);
+console.log("Server running on port " + PORT);
 });
+
