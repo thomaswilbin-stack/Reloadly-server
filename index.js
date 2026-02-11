@@ -5,16 +5,12 @@ const { Pool } = require("pg");
 
 const app = express();
 
-/* ================= RAW BODY SHOPIFY ================= */
+/* ================= RAW BODY ================= */
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 app.get("/", (req, res) => {
 res.status(200).send("Wimas Reloadly Server en ligne 🚀");
-});
-
-app.get("/webhook", (req, res) => {
-res.status(200).send("Webhook endpoint actif");
 });
 
 /* ================= ENV ================= */
@@ -46,7 +42,7 @@ created_at TIMESTAMP DEFAULT NOW()
 console.log("PostgreSQL prêt");
 })();
 
-/* ================= VERIFY SHOPIFY HMAC ================= */
+/* ================= HMAC VERIFY ================= */
 
 function verifyShopifyWebhook(req) {
 try {
@@ -66,7 +62,7 @@ return false;
 }
 }
 
-/* ================= RELOADLY TOKEN ================= */
+/* ================= TOKEN ================= */
 
 async function getReloadlyToken() {
 const response = await axios.post(
@@ -81,7 +77,7 @@ audience: "https://topups.reloadly.com"
 return response.data.access_token;
 }
 
-/* ================= AUTO DETECT OPERATOR ================= */
+/* ================= AUTO DETECT ================= */
 
 async function detectOperator(phone, countryCode, token) {
 const response = await axios.get(
@@ -91,11 +87,54 @@ headers: { Authorization: `Bearer ${token}` }
 }
 );
 
-if (!response.data || !response.data.operatorId) {
+if (!response.data?.operatorId) {
 throw new Error("Opérateur non détecté");
 }
 
 return response.data.operatorId;
+}
+
+/* ================= TELEPHONE FINDER ================= */
+
+function extractPhone(order, rechargeItem) {
+let phone = null;
+
+// 1️⃣ line item properties
+if (rechargeItem.properties?.length > 0) {
+const prop = rechargeItem.properties.find(p =>
+p.value && p.value.match(/\d{6,}/)
+);
+if (prop) phone = prop.value;
+}
+
+// 2️⃣ note_attributes
+if (!phone && order.note_attributes?.length > 0) {
+const attr = order.note_attributes.find(a =>
+a.value && a.value.match(/\d{6,}/)
+);
+if (attr) phone = attr.value;
+}
+
+// 3️⃣ order.note
+if (!phone && order.note && order.note.match(/\d{6,}/)) {
+phone = order.note;
+}
+
+// 4️⃣ shipping
+if (!phone && order.shipping_address?.phone) {
+phone = order.shipping_address.phone;
+}
+
+// 5️⃣ customer
+if (!phone && order.customer?.phone) {
+phone = order.customer.phone;
+}
+
+if (phone) {
+phone = phone.replace(/\D/g, "");
+}
+
+return phone;
 }
 
 /* ================= WEBHOOK ================= */
@@ -114,47 +153,30 @@ if (order.financial_status !== "paid") {
 return res.status(200).send("Non payé");
 }
 
-// 🔍 Trouver produit recharge par NOM
 const rechargeItem = order.line_items.find(item =>
 item.title && item.title.toUpperCase().includes("RECHARGE")
 );
 
 if (!rechargeItem) {
-console.log("Produit recharge non trouvé");
 return res.status(200).send("Pas recharge");
 }
 
 const checkoutId = order.checkout_id || order.id;
+const amount = parseFloat(rechargeItem.price);
+const phone = extractPhone(order, rechargeItem);
 
-/* ================= EXTRACTION TELEPHONE ================= */
-
-let phone = null;
-
-// Cherche dans les propriétés du produit
-if (rechargeItem.properties && rechargeItem.properties.length > 0) {
-const phoneProperty = rechargeItem.properties.find(prop =>
-prop.name.toLowerCase().includes("phone")
-);
-
-if (phoneProperty) {
-phone = phoneProperty.value;
-}
+if (!checkoutId || !amount || !phone || phone.length < 8) {
+console.log("Données invalides");
+return res.status(400).send("Données invalides");
 }
 
-if (!phone) {
-console.log("Téléphone non trouvé dans line item properties");
-return res.status(400).send("Téléphone manquant");
-}
+const countryCode = "HT";
 
-// Nettoyage du numéro
-phone = phone.replace(/\D/g, "");
+console.log("Checkout:", checkoutId);
+console.log("Phone:", phone);
+console.log("Amount:", amount);
 
-if (phone.length < 8) {
-console.log("Numéro invalide:", phone);
-return res.status(400).send("Numéro invalide");
-}
-
-/* ================= ANTI DOUBLE RECHARGE ================= */
+/* ================= ANTI DOUBLE ================= */
 
 const client = await pool.connect();
 
@@ -170,7 +192,7 @@ RETURNING *`,
 );
 
 if (insert.rowCount === 0) {
-console.log("Recharge déjà traitée - BLOQUÉE");
+console.log("Recharge déjà traitée");
 await client.query("ROLLBACK");
 return res.status(200).send("Déjà traité");
 }
@@ -185,11 +207,10 @@ return res.status(500).send("Erreur DB");
 client.release();
 }
 
-/* ================= ENVOI RELOADLY ================= */
+/* ================= RELOADLY ================= */
 
 try {
 const token = await getReloadlyToken();
-
 const operatorId = await detectOperator(phone, countryCode, token);
 
 await pool.query(
@@ -213,8 +234,7 @@ number: phone
 headers: {
 Authorization: `Bearer ${token}`,
 "Content-Type": "application/json"
-},
-timeout: 15000
+}
 }
 );
 
@@ -240,11 +260,10 @@ console.log("Erreur recharge:", err.response?.data || err.message);
 return res.status(200).send("OK");
 });
 
-/* ================= SERVER ================= */
+/* ================= PORT ================= */
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
 console.log("Wimas server running on port " + PORT);
 });
-
