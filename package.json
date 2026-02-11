@@ -1,7 +1,7 @@
 {
 "name": "reloadly-server",
 "version": "1.0.0",
-"type": "module",
+"type": "express",
 "main": "index.js",
 "scripts": {
 "start": "node index.js"
@@ -13,3 +13,4 @@
 "sqlite": "^5.1.1"
 }
 }
+
