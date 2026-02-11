@@ -81,15 +81,13 @@ audience: "https://topups.reloadly.com"
 return response.data.access_token;
 }
 
-/* ================= AUTO DÉTECTION OPÉRATEUR ================= */
+/* ================= AUTO DETECT OPERATOR ================= */
 
 async function detectOperator(phone, countryCode, token) {
 const response = await axios.get(
 `https://topups.reloadly.com/operators/auto-detect/phone/${phone}/countries/${countryCode}`,
 {
-headers: {
-Authorization: `Bearer ${token}`
-}
+headers: { Authorization: `Bearer ${token}` }
 }
 );
 
@@ -112,16 +110,20 @@ return res.status(401).send("HMAC invalide");
 
 const order = JSON.parse(req.body.toString());
 
+console.log("Financial status:", order.financial_status);
+
 if (order.financial_status !== "paid") {
 return res.status(200).send("Non payé");
 }
 
+// ✅ IDENTIFICATION PAR NOM PRODUIT
 const rechargeItem = order.line_items.find(item =>
-item.tags && item.tags.includes("RECHARGE")
+item.title && item.title.toUpperCase().includes("RECHARGE")
 );
 
 if (!rechargeItem) {
-return res.status(200).send("Pas une recharge");
+console.log("Produit recharge non trouvé");
+return res.status(200).send("Pas recharge");
 }
 
 const checkoutId = order.checkout_id;
@@ -129,10 +131,11 @@ const phone = order.note?.trim();
 const amount = parseFloat(rechargeItem.price);
 
 if (!checkoutId || !phone || !amount) {
+console.log("Données invalides");
 return res.status(400).send("Données invalides");
 }
 
-const countryCode = "HT"; // ⚠️ Change si multi-pays
+const countryCode = "HT"; // change si multi pays
 
 const client = await pool.connect();
 
@@ -148,7 +151,7 @@ RETURNING *`,
 );
 
 if (insert.rowCount === 0) {
-console.log("Recharge déjà traitée - bloquée");
+console.log("Recharge déjà traitée - BLOQUÉE");
 await client.query("ROLLBACK");
 return res.status(200).send("Déjà traité");
 }
