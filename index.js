@@ -5,7 +5,7 @@ const { Pool } = require("pg");
 
 const app = express();
 
-/* ================= RAW BODY POUR SHOPIFY ================= */
+/* ================= RAW BODY SHOPIFY ================= */
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
@@ -24,7 +24,7 @@ const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
 
-/* ================= POSTGRES ================= */
+/* ================= DATABASE ================= */
 
 const pool = new Pool({
 connectionString: DATABASE_URL,
@@ -46,7 +46,7 @@ created_at TIMESTAMP DEFAULT NOW()
 console.log("PostgreSQL prêt");
 })();
 
-/* ================= VERIFY HMAC ================= */
+/* ================= VERIFY SHOPIFY HMAC ================= */
 
 function verifyShopifyWebhook(req) {
 try {
@@ -110,13 +110,11 @@ return res.status(401).send("HMAC invalide");
 
 const order = JSON.parse(req.body.toString());
 
-console.log("Financial status:", order.financial_status);
-
 if (order.financial_status !== "paid") {
 return res.status(200).send("Non payé");
 }
 
-// ✅ IDENTIFICATION PAR NOM PRODUIT
+// 🔍 Trouver produit recharge par NOM
 const rechargeItem = order.line_items.find(item =>
 item.title && item.title.toUpperCase().includes("RECHARGE")
 );
@@ -126,16 +124,46 @@ console.log("Produit recharge non trouvé");
 return res.status(200).send("Pas recharge");
 }
 
-const checkoutId = order.checkout_id;
-const phone = order.note?.trim();
-const amount = parseFloat(rechargeItem.price);
+const checkoutId = order.checkout_id || order.id;
 
-if (!checkoutId || !phone || !amount) {
-console.log("Données invalides");
-return res.status(400).send("Données invalides");
+/* ================= EXTRACTION TELEPHONE ================= */
+
+let phone = null;
+
+if (order.note_attributes && order.note_attributes.length > 0) {
+const phoneField = order.note_attributes.find(attr =>
+attr.name.toLowerCase().includes("phone")
+);
+if (phoneField) phone = phoneField.value;
 }
 
-const countryCode = "HT"; // change si multi pays
+if (!phone) {
+console.log("Téléphone non trouvé dans note_attributes");
+return res.status(400).send("Téléphone manquant");
+}
+
+// Nettoyage numéro (enlève espaces, +, -, etc.)
+phone = phone.replace(/\D/g, "");
+
+if (phone.length < 8) {
+console.log("Numéro invalide:", phone);
+return res.status(400).send("Numéro invalide");
+}
+
+const amount = parseFloat(rechargeItem.price);
+
+if (!amount || amount <= 0) {
+console.log("Montant invalide");
+return res.status(400).send("Montant invalide");
+}
+
+const countryCode = "HT"; // ⚠️ adapte si multi pays
+
+console.log("Checkout:", checkoutId);
+console.log("Phone:", phone);
+console.log("Amount:", amount);
+
+/* ================= ANTI DOUBLE RECHARGE ================= */
 
 const client = await pool.connect();
 
@@ -166,6 +194,8 @@ return res.status(500).send("Erreur DB");
 client.release();
 }
 
+/* ================= ENVOI RELOADLY ================= */
+
 try {
 const token = await getReloadlyToken();
 
@@ -176,15 +206,15 @@ await pool.query(
 [operatorId, checkoutId]
 );
 
-const topupResponse = await axios.post(
+const response = await axios.post(
 "https://topups.reloadly.com/topups",
 {
-operatorId: operatorId,
-amount: amount,
+operatorId,
+amount,
 useLocalAmount: false,
 customIdentifier: checkoutId,
 recipientPhone: {
-countryCode: countryCode,
+countryCode,
 number: phone
 }
 },
@@ -203,7 +233,7 @@ WHERE checkout_id=$1`,
 [checkoutId]
 );
 
-console.log("Recharge SUCCESS:", topupResponse.data);
+console.log("Recharge SUCCESS:", response.data);
 
 } catch (err) {
 
@@ -219,7 +249,7 @@ console.log("Erreur recharge:", err.response?.data || err.message);
 return res.status(200).send("OK");
 });
 
-/* ================= PORT ================= */
+/* ================= SERVER ================= */
 
 const PORT = process.env.PORT || 3000;
 
