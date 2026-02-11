@@ -1,13 +1,26 @@
-app.get("/", (req, res) => {
-res.send("Wimas Reloadly Server en ligne 🚀");
-});
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
 const { Pool } = require("pg");
 
 const app = express();
+
+// =====================
+// IMPORTANT POUR HMAC SHOPIFY
+// =====================
+app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
+
+// =====================
+// ROUTE TEST (évite Cannot GET)
+// =====================
+app.get("/", (req, res) => {
+res.status(200).send("Wimas Reloadly Server en ligne 🚀");
+});
+
+app.get("/health", (req, res) => {
+res.status(200).json({ status: "OK" });
+});
 
 // =====================
 // ENV VARIABLES
@@ -18,16 +31,14 @@ const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
 
 // =====================
-// POSTGRES CONNECTION
+// POSTGRESQL
 // =====================
 const pool = new Pool({
 connectionString: DATABASE_URL,
 ssl: { rejectUnauthorized: false }
 });
 
-// =====================
-// CREATE TABLE
-// =====================
+// Création table
 (async () => {
 await pool.query(`
 CREATE TABLE IF NOT EXISTS recharges (
@@ -43,13 +54,13 @@ console.log("PostgreSQL prêt");
 })();
 
 // =====================
-// VERIFY SHOPIFY HMAC
+// VERIFY HMAC
 // =====================
 function verifyShopifyWebhook(req) {
 const hmac = req.get("X-Shopify-Hmac-Sha256");
 const digest = crypto
 .createHmac("sha256", SHOPIFY_SECRET)
-.update(JSON.stringify(req.body), "utf8")
+.update(req.body, "utf8")
 .digest("base64");
 
 if (!hmac) return false;
@@ -85,21 +96,18 @@ if (!verifyShopifyWebhook(req)) {
 return res.status(401).send("HMAC invalide");
 }
 
-const order = req.body;
+const order = JSON.parse(req.body.toString());
 
 if (order.financial_status !== "paid") {
 return res.status(200).send("Non payé");
 }
 
-// =====================
-// IDENTIFIER PRODUIT RECHARGE
-// =====================
+// 🔍 Identifier produit RECHARGE
 const rechargeItem = order.line_items.find(item =>
 item.title.toLowerCase().includes("recharge")
 );
 
 if (!rechargeItem) {
-console.log("Commande ignorée (pas recharge)");
 return res.status(200).send("Pas recharge");
 }
 
@@ -116,7 +124,6 @@ const client = await pool.connect();
 try {
 await client.query("BEGIN");
 
-// 🔒 Vérifie si déjà traité
 const existing = await client.query(
 "SELECT status FROM recharges WHERE checkout_id = $1 FOR UPDATE",
 [checkoutId]
@@ -127,7 +134,6 @@ await client.query("ROLLBACK");
 return res.status(200).send("Déjà traité");
 }
 
-// 🔒 Protection 5 minutes même numéro
 const recent = await client.query(
 `SELECT id FROM recharges
 WHERE phone = $1
@@ -140,13 +146,11 @@ await client.query("ROLLBACK");
 return res.status(200).send("Bloqué 5 minutes");
 }
 
-// 🔐 Idempotency key
 const idempotencyKey = crypto
 .createHash("sha256")
 .update(checkoutId + phone + amount)
 .digest("hex");
 
-// Insert processing
 await client.query(
 `INSERT INTO recharges (checkout_id, phone, amount, status)
 VALUES ($1, $2, $3, $4)`,
@@ -156,7 +160,7 @@ VALUES ($1, $2, $3, $4)`,
 await client.query("COMMIT");
 
 // =====================
-// RELOADLY CALL
+// RELOADLY
 // =====================
 const token = await getReloadlyToken();
 
@@ -216,4 +220,3 @@ client.release();
 app.listen(3000, () => {
 console.log("Serveur PostgreSQL Wimas démarré");
 });
-
