@@ -1,267 +1,201 @@
-import express from "express";
-import crypto from "crypto";
-import axios from "axios";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
+const express = require("express");
+const axios = require("axios");
+const crypto = require("crypto");
+const sqlite3 = require("sqlite3").verbose();
+const path = require("path");
 
 const app = express();
+app.use(express.json());
 
-/* =========================
-CONFIG
-========================= */
-const PORT = process.env.PORT || 10000;
-const SHOPIFY_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+// =============================
+// CONFIG
+// =============================
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const RELOADLY_CLIENT_ID = process.env.RELOADLY_CLIENT_ID;
 const RELOADLY_CLIENT_SECRET = process.env.RELOADLY_CLIENT_SECRET;
-const RELOADLY_BASE_URL = "https://topups.reloadly.com";
 
-/* =========================
-SQLITE (PERSISTANT RENDER)
-========================= */
-const db = await open({
-filename: "/data/recharges.db", // ✅ PERSISTANT SUR RENDER
-driver: sqlite3.Database,
+// =============================
+// SQLITE (PERSISTANT STARTER)
+// =============================
+const dbPath = path.join(__dirname, "recharges.db");
+
+const db = new sqlite3.Database(dbPath, (err) => {
+if (err) {
+console.error("Erreur DB:", err);
+} else {
+console.log("SQLite connecté :", dbPath);
+}
 });
 
-await db.exec(`
-CREATE TABLE IF NOT EXISTS processed_orders (
+db.run(`
+CREATE TABLE IF NOT EXISTS recharges (
 id INTEGER PRIMARY KEY AUTOINCREMENT,
-unique_key TEXT UNIQUE,
+checkout_id TEXT UNIQUE,
 phone TEXT,
-status TEXT DEFAULT 'PROCESSING',
+amount REAL,
+status TEXT,
 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 `);
 
-async function markSuccess(key) {
-await db.run(
-"UPDATE processed_orders SET status = 'SUCCESS' WHERE unique_key = ?",
-key
-);
-}
-
-async function markFailed(key) {
-await db.run(
-"UPDATE processed_orders SET status = 'FAILED' WHERE unique_key = ?",
-key
-);
-}
-
-/* =========================
-WEBHOOK SHOPIFY
-========================= */
-app.post(
-"/webhook",
-express.raw({ type: "application/json" }),
-async (req, res) => {
-let uniqueKey = null;
-
-try {
-/* ===== HMAC ===== */
-const hmac = req.headers["x-shopify-hmac-sha256"];
-const body = req.body.toString("utf8");
-
-const generated = crypto
-.createHmac("sha256", SHOPIFY_SECRET)
-.update(body)
+// =============================
+// HMAC SHOPIFY VERIFY
+// =============================
+function verifyShopifyWebhook(req) {
+const hmac = req.get("X-Shopify-Hmac-Sha256");
+const digest = crypto
+.createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+.update(JSON.stringify(req.body), "utf8")
 .digest("base64");
 
-if (generated !== hmac) {
-console.log("❌ HMAC invalide");
-return res.status(401).send("Unauthorized");
-}
-
-const data = JSON.parse(body);
-
-console.log("\n✅ Webhook PAYÉ reçu");
-console.log("🧾 Order ID:", data.id);
-
-/* =========================
-EXTRACTION NUMÉRO
-========================= */
-let phone = null;
-
-for (const item of data.line_items || []) {
-for (const prop of item.properties || []) {
-const key = (prop.name || "")
-.toLowerCase()
-.normalize("NFD")
-.replace(/[\u0300-\u036f]/g, "");
-
-if (
-key.includes("numero") ||
-key.includes("phone") ||
-key.includes("telephone")
-) {
-if (prop.value && prop.value.trim()) {
-phone = prop.value.trim();
-break;
-}
-}
-}
-if (phone) break;
-}
-
-const cleanPhone = phone?.replace(/\D/g, "");
-console.log("📞 Numéro nettoyé:", cleanPhone);
-
-if (!cleanPhone || !cleanPhone.startsWith("509") || cleanPhone.length !== 11) {
-console.log("❌ Numéro invalide");
-return res.status(200).send("Invalid phone");
-}
-
-/* =========================
-LIMITE JOURNALIÈRE
-========================= */
-const todayCount = await db.get(
-`
-SELECT COUNT(*) as count
-FROM processed_orders
-WHERE phone = ?
-AND DATE(created_at) = DATE('now')
-AND status = 'SUCCESS'
-`,
-cleanPhone
+return crypto.timingSafeEqual(
+Buffer.from(hmac || "", "utf8"),
+Buffer.from(digest, "utf8")
 );
-
-if (todayCount.count >= 2) {
-console.log("🚫 Limite journalière atteinte");
-return res.status(200).send("Limit reached");
 }
 
-/* =========================
-PRODUIT RECHARGE
-========================= */
-let topupAmount = null;
-let topupItem = null;
-
-for (const item of data.line_items || []) {
-const title = (item.title || "").toLowerCase().trim();
-if (title.includes("recharge")) {
-topupAmount = Number(item.price);
-topupItem = item;
-break;
-}
-}
-
-console.log("💳 Produit TOP-UP:", topupItem?.title);
-console.log("💰 Montant TOP-UP détecté:", topupAmount);
-
-if (!topupAmount || topupAmount <= 0) {
-console.log("❌ Aucun produit RECHARGE détecté");
-return res.status(200).send("No recharge product");
-}
-
-/* =========================
-CLÉ ATOMIQUE STABLE
-========================= */
-const orderId = data.id;
-uniqueKey = `${orderId}-${cleanPhone}-${topupAmount}`;
-console.log("🔐 Clé atomique:", uniqueKey);
-
-/* =========================
-INSERTION ATOMIQUE
-========================= */
-try {
-await db.run(
-"INSERT INTO processed_orders (unique_key, phone, status) VALUES (?, ?, 'PROCESSING')",
-uniqueKey,
-cleanPhone
-);
-console.log("🧱 Transaction atomique créée");
-} catch (err) {
-if (err.message.includes("UNIQUE")) {
-console.log("🛑 Doublon atomique détecté → BLOQUÉ");
-return res.status(200).send("Already processed");
-}
-throw err;
-}
-
-/* =========================
-AUTH RELOADLY
-========================= */
-const auth = await axios.post(
+// =============================
+// GET RELOADLY TOKEN
+// =============================
+async function getReloadlyToken() {
+const response = await axios.post(
 "https://auth.reloadly.com/oauth/token",
 {
 client_id: RELOADLY_CLIENT_ID,
 client_secret: RELOADLY_CLIENT_SECRET,
 grant_type: "client_credentials",
-audience: RELOADLY_BASE_URL,
-},
-{ timeout: 7000 }
-);
-
-const token = auth.data.access_token;
-
-/* =========================
-AUTO DETECT
-========================= */
-const detect = await axios.get(
-`${RELOADLY_BASE_URL}/operators/auto-detect/phone/${cleanPhone}/countries/HT`,
-{
-timeout: 7000,
-headers: {
-Authorization: `Bearer ${token}`,
-Accept: "application/com.reloadly.topups-v1+json",
-},
+audience: "https://topups.reloadly.com"
 }
 );
 
-const operatorId = detect.data.operatorId;
+return response.data.access_token;
+}
 
-/* =========================
-RECHARGE
-========================= */
+// =============================
+// WEBHOOK
+// =============================
+app.post("/webhook", async (req, res) => {
+
+if (!verifyShopifyWebhook(req)) {
+return res.status(401).send("HMAC invalide");
+}
+
+const order = req.body;
+
+const checkoutId = order.checkout_id;
+const amount = parseFloat(order.total_price);
+const phoneRaw = order.note || "";
+const phone = phoneRaw.replace(/\D/g, "");
+
+if (!checkoutId || !phone || !amount) {
+return res.status(400).send("Données invalides");
+}
+
+console.log("Nouvelle commande :", checkoutId);
+
+db.serialize(() => {
+db.run("BEGIN IMMEDIATE TRANSACTION");
+
+// 1️⃣ Vérifie si checkout déjà existant
+db.get(
+"SELECT status FROM recharges WHERE checkout_id = ?",
+[checkoutId],
+async (err, row) => {
+
+if (row) {
+console.log("Déjà traité :", checkoutId);
+db.run("ROLLBACK");
+return res.status(200).send("Déjà traité");
+}
+
+// 2️⃣ Protection 10 minutes même phone + montant
+db.get(
+`SELECT id FROM recharges
+WHERE phone = ? AND amount = ?
+AND created_at >= datetime('now','-10 minutes')`,
+[phone, amount],
+async (err2, recent) => {
+
+if (recent) {
+console.log("Recharge bloquée (10 min)");
+db.run("ROLLBACK");
+return res.status(200).send("Doublon 10 min bloqué");
+}
+
+// 3️⃣ Insert processing
+db.run(
+`INSERT INTO recharges (checkout_id, phone, amount, status)
+VALUES (?, ?, ?, ?)`,
+[checkoutId, phone, amount, "processing"],
+async (err3) => {
+
+if (err3) {
+console.log("Insert bloqué:", err3.message);
+db.run("ROLLBACK");
+return res.status(200).send("Insert bloqué");
+}
+
+db.run("COMMIT");
+
+try {
+
+const token = await getReloadlyToken();
+
+// Auto detect opérateur
+const operator = await axios.get(
+`https://topups.reloadly.com/operators/auto-detect/phone/${phone}/countries/HT`,
+{ headers: { Authorization: `Bearer ${token}` } }
+);
+
+const operatorId = operator.data.operatorId;
+
+// Timeout sécurité 20 sec
 const topup = await axios.post(
-`${RELOADLY_BASE_URL}/topups`,
+"https://topups.reloadly.com/topups",
 {
-operatorId,
-amount: topupAmount,
+operatorId: operatorId,
+amount: amount,
 useLocalAmount: false,
+customIdentifier: checkoutId,
 recipientPhone: {
 countryCode: "HT",
-number: cleanPhone,
-},
-customIdentifier: uniqueKey,
+number: phone
+}
 },
 {
-timeout: 10000,
-headers: {
-Authorization: `Bearer ${token}`,
-Accept: "application/com.reloadly.topups-v1+json",
-},
+headers: { Authorization: `Bearer ${token}` },
+timeout: 20000
 }
 );
 
-console.log("🎉 RECHARGE RÉUSSIE");
-console.log("🆔 Transaction:", topup.data.transactionId);
+console.log("Recharge OK:", topup.data.transactionId);
 
-await markSuccess(uniqueKey);
+db.run(
+"UPDATE recharges SET status = ? WHERE checkout_id = ?",
+["success", checkoutId]
+);
+
+} catch (error) {
+
+console.log("Erreur recharge:", error.message);
+
+db.run(
+"UPDATE recharges SET status = ? WHERE checkout_id = ?",
+["failed", checkoutId]
+);
+}
 
 return res.status(200).send("OK");
-
-} catch (err) {
-console.error("❌ Erreur recharge:", err.response?.data || err.message);
-
-if (uniqueKey) {
-await markFailed(uniqueKey);
-}
-
-return res.status(200).send("Handled");
-}
 }
 );
-
-/* =========================
-HEALTH CHECK
-========================= */
-app.get("/", (req, res) => {
-res.send("Reloadly server running");
+}
+);
+}
+);
+});
 });
 
-/* =========================
-START
-========================= */
-app.listen(PORT, () => {
-console.log(`🚀 Serveur actif sur port ${PORT}`);
+// =============================
+app.listen(3000, () => {
+console.log("Serveur démarré sur port 3000");
 });
