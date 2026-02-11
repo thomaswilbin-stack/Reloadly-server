@@ -1,3 +1,6 @@
+app.get("/", (req, res) => {
+res.send("Wimas Reloadly Server en ligne 🚀");
+});
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
@@ -213,3 +216,4 @@ client.release();
 app.listen(3000, () => {
 console.log("Serveur PostgreSQL Wimas démarré");
 });
+
