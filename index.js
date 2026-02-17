@@ -68,7 +68,10 @@ return false;
 }
 }
 
-/* ================= TOKEN ================= */
+/* ================= TOKEN AUTO REFRESH ================= */
+
+let reloadlyToken = null;
+let tokenExpiry = null;
 
 async function getReloadlyToken() {
 const response = await axios.post(
@@ -80,7 +83,20 @@ grant_type: "client_credentials",
 audience: "https://topups.reloadly.com"
 }
 );
-return response.data.access_token;
+
+reloadlyToken = response.data.access_token;
+tokenExpiry = Date.now() + (response.data.expires_in - 60) * 1000;
+
+console.log("Nouveau token Reloadly généré");
+
+return reloadlyToken;
+}
+
+async function ensureValidToken() {
+if (!reloadlyToken || Date.now() >= tokenExpiry) {
+await getReloadlyToken();
+}
+return reloadlyToken;
 }
 
 /* ================= OPERATOR DETECT ================= */
@@ -161,7 +177,6 @@ if (!checkoutId || !amount || !phone) {
 return res.status(400).send("Données invalides");
 }
 
-/* 🚀 Répond immédiatement à Shopify */
 res.status(200).send("OK");
 
 try {
@@ -188,13 +203,40 @@ VALUES ($1,$2,$3,'processing')`,
 
 /* ================= RELOADLY ================= */
 
-const token = await getReloadlyToken();
+let token = await ensureValidToken();
 const operatorId = await detectOperator(phone, countryCode, token);
 
 await pool.query(
 `UPDATE recharges SET operator_id=$1 WHERE checkout_id=$2`,
 [operatorId, checkoutId]
 );
+
+try {
+await axios.post(
+"https://topups.reloadly.com/topups",
+{
+operatorId,
+amount,
+useLocalAmount: false,
+customIdentifier: checkoutId,
+recipientPhone: {
+countryCode,
+number: phone
+}
+},
+{
+headers: {
+Authorization: `Bearer ${token}`,
+"Content-Type": "application/json"
+}
+}
+);
+} catch (error) {
+
+/* 🔁 Si token expiré → régénère et retente */
+if (error.response?.status === 401) {
+console.log("Token expiré, régénération...");
+token = await getReloadlyToken();
 
 await axios.post(
 "https://topups.reloadly.com/topups",
@@ -215,6 +257,10 @@ Authorization: `Bearer ${token}`,
 }
 }
 );
+} else {
+throw error;
+}
+}
 
 await pool.query(
 `UPDATE recharges SET status='success'
@@ -244,4 +290,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
 console.log("Server running on port " + PORT);
 });
-
