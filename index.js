@@ -24,7 +24,7 @@ pool.connect()
 .catch(err => console.error("❌ Erreur PostgreSQL", err));
 
 // ======================
-// TOKEN RELOADLY
+// TOKEN RELOADLY (AUTO REFRESH)
 // ======================
 
 let reloadlyToken = null;
@@ -52,6 +52,21 @@ tokenExpiry = Date.now() + (response.data.expires_in - 60) * 1000;
 console.log("🔑 Nouveau token Reloadly obtenu");
 
 return reloadlyToken;
+}
+
+// ======================
+// NORMALISATION TELEPHONE
+// ======================
+
+function normalizePhone(phone) {
+if (!phone) return null;
+
+phone = phone.replace(/[\s\-()]/g, "");
+
+if (phone.startsWith("+")) phone = phone.substring(1);
+if (phone.startsWith("509")) phone = phone.substring(3);
+
+return phone;
 }
 
 // ======================
@@ -93,11 +108,10 @@ return true;
 }
 
 // ======================
-// EXTRACTION TELEPHONE ULTRA-ROBUSTE
+// EXTRACTION TELEPHONE
 // ======================
 
 function extractPhone(order) {
-// 1️⃣ Note attributes
 if (order.note_attributes) {
 for (let attr of order.note_attributes) {
 const name = attr.name.toLowerCase();
@@ -107,7 +121,6 @@ return attr.value;
 }
 }
 
-// 2️⃣ Line items properties
 if (order.line_items) {
 for (let item of order.line_items) {
 if (item.properties) {
@@ -121,13 +134,8 @@ return prop.value;
 }
 }
 
-// 3️⃣ Customer phone
 if (order.customer?.phone) return order.customer.phone;
-
-// 4️⃣ Shipping address phone
 if (order.shipping_address?.phone) return order.shipping_address.phone;
-
-// 5️⃣ Billing address phone
 if (order.billing_address?.phone) return order.billing_address.phone;
 
 return null;
@@ -151,11 +159,11 @@ headers: {
 }
 );
 
-console.log("📦 Commande marquée Fulfilled + email envoyé");
+console.log("📦 Commande Fulfilled + email envoyé");
 }
 
 // ======================
-// WEBHOOK SHOPIFY (RAW BODY)
+// WEBHOOK SHOPIFY
 // ======================
 
 app.post(
@@ -163,6 +171,7 @@ app.post(
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
+
 const hmac = req.headers["x-shopify-hmac-sha256"];
 const digest = crypto
 .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
@@ -176,16 +185,22 @@ return res.sendStatus(401);
 
 const order = JSON.parse(req.body.toString());
 
+console.log("📩 Webhook reçu");
+
 if (order.financial_status !== "paid") {
+console.log("⏳ Commande non payée");
 return res.sendStatus(200);
 }
 
 const orderId = order.id;
-const phone = extractPhone(order);
 
-if (!phone) {
-console.log("⚠ Téléphone non trouvé");
-console.log("🔍 Order object:", JSON.stringify(order, null, 2)); // pour debug
+let phone = extractPhone(order);
+phone = normalizePhone(phone);
+
+console.log("📞 Téléphone :", phone);
+
+if (!phone || phone.length !== 8) {
+console.log("❌ Numéro invalide");
 return res.sendStatus(200);
 }
 
@@ -195,6 +210,7 @@ const title = order.line_items[0].title.toUpperCase();
 const token = await getReloadlyToken();
 
 let operatorId;
+
 if (title.includes("NATCOM")) {
 operatorId = 1296;
 console.log("📡 Plan Natcom détecté");
@@ -205,6 +221,9 @@ console.log("📡 Plan Digicel détecté");
 operatorId = await detectOperator(phone, token);
 console.log("📱 Recharge normale détectée");
 }
+
+console.log("📡 Operator ID:", operatorId);
+console.log("💵 Montant:", amount);
 
 if (operatorId === 1296 || operatorId === 1297) {
 await validateBundleAmount(operatorId, amount, token);
@@ -243,9 +262,12 @@ await pool.query(
 
 await markOrderAsFulfilled(orderId);
 
+console.log("✅ Recharge réussie");
+
 res.sendStatus(200);
 
 } catch (error) {
+
 console.error("❌ Erreur recharge :", error.response?.data || error.message);
 res.sendStatus(200);
 }
@@ -256,7 +278,7 @@ res.sendStatus(200);
 // ROUTE TEST
 // ======================
 
-app.get("/", express.json(), (req, res) => {
+app.get("/", (req, res) => {
 res.send("🚀 Wimas Reloadly Server en ligne");
 });
 
