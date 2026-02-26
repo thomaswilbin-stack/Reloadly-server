@@ -24,7 +24,7 @@ pool.connect()
 .catch(err => console.error("❌ Erreur PostgreSQL", err));
 
 // ======================
-// TOKEN RELOADLY (AUTO REFRESH)
+// TOKEN RELOADLY
 // ======================
 
 let reloadlyToken = null;
@@ -50,7 +50,6 @@ reloadlyToken = response.data.access_token;
 tokenExpiry = Date.now() + (response.data.expires_in - 60) * 1000;
 
 console.log("🔑 Nouveau token Reloadly obtenu");
-
 return reloadlyToken;
 }
 
@@ -62,11 +61,46 @@ function normalizePhone(phone) {
 if (!phone) return null;
 
 phone = phone.replace(/[\s\-()]/g, "");
-
 if (phone.startsWith("+")) phone = phone.substring(1);
 if (phone.startsWith("509")) phone = phone.substring(3);
 
 return phone;
+}
+
+// ======================
+// EXTRACTION ULTRA ROBUSTE
+// ======================
+
+function extractPhone(order) {
+
+// 1️⃣ line item properties
+if (order.line_items) {
+for (let item of order.line_items) {
+if (item.properties) {
+for (let prop of item.properties) {
+if (prop.value && prop.value.match(/\d{8}/)) {
+return prop.value;
+}
+}
+}
+}
+}
+
+// 2️⃣ note attributes
+if (order.note_attributes) {
+for (let attr of order.note_attributes) {
+if (attr.value && attr.value.match(/\d{8}/)) {
+return attr.value;
+}
+}
+}
+
+// 3️⃣ fallback
+if (order.customer?.phone) return order.customer.phone;
+if (order.shipping_address?.phone) return order.shipping_address.phone;
+if (order.billing_address?.phone) return order.billing_address.phone;
+
+return null;
 }
 
 // ======================
@@ -78,7 +112,6 @@ const response = await axios.get(
 `https://topups.reloadly.com/operators/auto-detect/phone/${phone}/countries/HT`,
 { headers: { Authorization: `Bearer ${token}` } }
 );
-
 return response.data.operatorId;
 }
 
@@ -93,52 +126,16 @@ const response = await axios.get(
 );
 
 const operator = response.data;
-
 if (!operator.denominations) {
-throw new Error("Impossible de récupérer les montants");
+throw new Error("Montants indisponibles");
 }
 
-const allowedAmounts = operator.denominations.map(d => parseFloat(d));
-
-if (!allowedAmounts.includes(parseFloat(amount))) {
+const allowed = operator.denominations.map(d => parseFloat(d));
+if (!allowed.includes(parseFloat(amount))) {
 throw new Error("Montant non autorisé pour ce plan");
 }
 
 return true;
-}
-
-// ======================
-// EXTRACTION TELEPHONE
-// ======================
-
-function extractPhone(order) {
-if (order.note_attributes) {
-for (let attr of order.note_attributes) {
-const name = attr.name.toLowerCase();
-if (name.includes("phone") || name.includes("tel") || name.includes("mobile")) {
-return attr.value;
-}
-}
-}
-
-if (order.line_items) {
-for (let item of order.line_items) {
-if (item.properties) {
-for (let prop of item.properties) {
-const name = prop.name.toLowerCase();
-if (name.includes("phone") || name.includes("tel") || name.includes("mobile")) {
-return prop.value;
-}
-}
-}
-}
-}
-
-if (order.customer?.phone) return order.customer.phone;
-if (order.shipping_address?.phone) return order.shipping_address.phone;
-if (order.billing_address?.phone) return order.billing_address.phone;
-
-return null;
 }
 
 // ======================
@@ -159,7 +156,7 @@ headers: {
 }
 );
 
-console.log("📦 Commande Fulfilled + email envoyé");
+console.log("📦 Fulfilled + email envoyé");
 }
 
 // ======================
@@ -179,12 +176,11 @@ const digest = crypto
 .digest("base64");
 
 if (hmac !== digest) {
-console.log("❌ Webhook non valide");
+console.log("❌ Webhook invalide");
 return res.sendStatus(401);
 }
 
 const order = JSON.parse(req.body.toString());
-
 console.log("📩 Webhook reçu");
 
 if (order.financial_status !== "paid") {
@@ -197,9 +193,9 @@ const orderId = order.id;
 let phone = extractPhone(order);
 phone = normalizePhone(phone);
 
-console.log("📞 Téléphone :", phone);
+console.log("📞 Téléphone:", phone);
 
-if (!phone || phone.length !== 8) {
+if (!phone || !phone.match(/^\d{8}$/)) {
 console.log("❌ Numéro invalide");
 return res.sendStatus(200);
 }
@@ -213,16 +209,16 @@ let operatorId;
 
 if (title.includes("NATCOM")) {
 operatorId = 1296;
-console.log("📡 Plan Natcom détecté");
+console.log("📡 Plan Natcom");
 } else if (title.includes("DIGICEL")) {
 operatorId = 1297;
-console.log("📡 Plan Digicel détecté");
+console.log("📡 Plan Digicel");
 } else {
 operatorId = await detectOperator(phone, token);
-console.log("📱 Recharge normale détectée");
+console.log("📱 Recharge normale");
 }
 
-console.log("📡 Operator ID:", operatorId);
+console.log("📡 Operator:", operatorId);
 console.log("💵 Montant:", amount);
 
 if (operatorId === 1296 || operatorId === 1297) {
@@ -235,7 +231,7 @@ const existing = await pool.query(
 );
 
 if (existing.rows.length > 0) {
-console.log("⚠ Recharge déjà traitée");
+console.log("⚠ Déjà traité");
 return res.sendStatus(200);
 }
 
@@ -263,12 +259,10 @@ await pool.query(
 await markOrderAsFulfilled(orderId);
 
 console.log("✅ Recharge réussie");
-
 res.sendStatus(200);
 
 } catch (error) {
-
-console.error("❌ Erreur recharge :", error.response?.data || error.message);
+console.error("❌ Erreur:", error.response?.data || error.message);
 res.sendStatus(200);
 }
 }
