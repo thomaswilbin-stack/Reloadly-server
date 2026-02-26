@@ -5,7 +5,9 @@ const { Pool } = require("pg");
 const crypto = require("crypto");
 
 const app = express();
-app.use(express.json());
+
+// ⚠ On ne met PAS express.json() globalement
+// car Shopify a besoin du raw body pour la signature
 
 const PORT = process.env.PORT || 10000;
 
@@ -24,21 +26,6 @@ process.env.NODE_ENV === "production"
 pool.connect()
 .then(() => console.log("✅ PostgreSQL prêt"))
 .catch(err => console.error("❌ Erreur PostgreSQL", err));
-
-// ======================
-// VERIFICATION WEBHOOK SHOPIFY
-// ======================
-
-function verifyShopifyWebhook(req) {
-const hmac = req.headers["x-shopify-hmac-sha256"];
-
-const digest = crypto
-.createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
-.update(JSON.stringify(req.body), "utf8")
-.digest("base64");
-
-return hmac === digest;
-}
 
 // ======================
 // TOKEN RELOADLY
@@ -161,18 +148,28 @@ console.log("📦 Commande marquée Fulfilled + email envoyé");
 }
 
 // ======================
-// WEBHOOK SHOPIFY
+// WEBHOOK SHOPIFY (RAW BODY)
 // ======================
 
-app.post("/webhook", async (req, res) => {
+app.post(
+"/webhook",
+express.raw({ type: "application/json" }),
+async (req, res) => {
 try {
 
-if (!verifyShopifyWebhook(req)) {
+const hmac = req.headers["x-shopify-hmac-sha256"];
+
+const digest = crypto
+.createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
+.update(req.body)
+.digest("base64");
+
+if (hmac !== digest) {
 console.log("❌ Webhook non valide");
 return res.sendStatus(401);
 }
 
-const order = req.body;
+const order = JSON.parse(req.body.toString());
 
 if (order.financial_status !== "paid") {
 return res.sendStatus(200);
@@ -250,10 +247,11 @@ res.sendStatus(200);
 console.error("❌ Erreur recharge :", error.response?.data || error.message);
 res.sendStatus(200);
 }
-});
+}
+);
 
 // ======================
-// ROOT TEST
+// ROUTE TEST
 // ======================
 
 app.get("/", (req, res) => {
