@@ -5,10 +5,6 @@ const { Pool } = require("pg");
 const crypto = require("crypto");
 
 const app = express();
-
-// ⚠ On ne met PAS express.json() globalement
-// car Shopify a besoin du raw body pour la signature
-
 const PORT = process.env.PORT || 10000;
 
 // ======================
@@ -101,25 +97,35 @@ return true;
 // ======================
 
 function extractPhone(order) {
+// 1️⃣ Note attributes
 if (order.note_attributes) {
 for (let attr of order.note_attributes) {
-if (attr.name.toLowerCase().includes("phone")) {
+const name = attr.name.toLowerCase();
+if (name.includes("phone") || name.includes("tel") || name.includes("mobile")) {
 return attr.value;
 }
 }
 }
 
+// 2️⃣ Line items properties
 if (order.line_items) {
 for (let item of order.line_items) {
 if (item.properties) {
 for (let prop of item.properties) {
-if (prop.name.toLowerCase().includes("phone")) {
+const name = prop.name.toLowerCase();
+if (name.includes("phone") || name.includes("tel") || name.includes("mobile")) {
 return prop.value;
 }
 }
 }
 }
 }
+
+// 3️⃣ Customer phone
+if (order.customer?.phone) return order.customer.phone;
+
+// 4️⃣ Shipping address phone
+if (order.shipping_address?.phone) return order.shipping_address.phone;
 
 return null;
 }
@@ -132,9 +138,7 @@ async function markOrderAsFulfilled(orderId) {
 await axios.post(
 `https://${process.env.SHOPIFY_STORE}/admin/api/2024-01/orders/${orderId}/fulfillments.json`,
 {
-fulfillment: {
-notify_customer: true
-}
+fulfillment: { notify_customer: true }
 },
 {
 headers: {
@@ -156,9 +160,7 @@ app.post(
 express.raw({ type: "application/json" }),
 async (req, res) => {
 try {
-
 const hmac = req.headers["x-shopify-hmac-sha256"];
-
 const digest = crypto
 .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
 .update(req.body)
@@ -189,7 +191,6 @@ const title = order.line_items[0].title.toUpperCase();
 const token = await getReloadlyToken();
 
 let operatorId;
-
 if (title.includes("NATCOM")) {
 operatorId = 1296;
 console.log("📡 Plan Natcom détecté");
@@ -226,10 +227,7 @@ await axios.post(
 operatorId,
 amount,
 useLocalAmount: true,
-recipientPhone: {
-countryCode: "HT",
-number: phone
-}
+recipientPhone: { countryCode: "HT", number: phone }
 },
 { headers: { Authorization: `Bearer ${token}` } }
 );
@@ -254,7 +252,7 @@ res.sendStatus(200);
 // ROUTE TEST
 // ======================
 
-app.get("/", (req, res) => {
+app.get("/", express.json(), (req, res) => {
 res.send("🚀 Wimas Reloadly Server en ligne");
 });
 
