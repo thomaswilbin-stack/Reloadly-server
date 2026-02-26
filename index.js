@@ -93,7 +93,7 @@ return true;
 }
 
 // ======================
-// EXTRACTION TELEPHONE
+// EXTRACTION TELEPHONE ULTRA-ROBUSTE
 // ======================
 
 function extractPhone(order) {
@@ -126,6 +126,9 @@ if (order.customer?.phone) return order.customer.phone;
 
 // 4️⃣ Shipping address phone
 if (order.shipping_address?.phone) return order.shipping_address.phone;
+
+// 5️⃣ Billing address phone
+if (order.billing_address?.phone) return order.billing_address.phone;
 
 return null;
 }
@@ -182,6 +185,7 @@ const phone = extractPhone(order);
 
 if (!phone) {
 console.log("⚠ Téléphone non trouvé");
+console.log("🔍 Order object:", JSON.stringify(order, null, 2)); // pour debug
 return res.sendStatus(200);
 }
 
